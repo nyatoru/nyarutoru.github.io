@@ -229,7 +229,8 @@ function do_pacstrap() {
     pacman-key --populate archlinux
     
     echo "=== Installing base system ==="
-    pacstrap /mnt base linux linux-firmware openssh grub efibootmgr
+    # ลบ grub และ efibootmgr ออก
+    pacstrap /mnt base linux linux-firmware openssh
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -238,13 +239,29 @@ function do_pacstrap() {
 function finalize() {
     local hostname="$1"
     
-    echo "=== Configuring GRUB ==="
-    sed -i -e 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
-    sed -i -e 's/GRUB_CMDLINE_LINUX_DEFAULT.*/GRUB_CMDLINE_LINUX_DEFAULT=""/' /etc/default/grub
+    echo "=== Installing systemd-boot ==="
+    bootctl install
     
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-    grub-mkconfig -o /boot/grub/grub.cfg
-
+    echo "=== Configuring systemd-boot ==="
+    # สร้าง loader configuration
+    cat << EOF > /boot/loader/loader.conf
+default arch.conf
+timeout 2
+console-mode max
+editor no
+EOF
+    
+    # หา root partition UUID
+    local root_uuid=$(blkid -s UUID -o value ${DISK}2)
+    
+    # สร้าง boot entry
+    cat << EOF > /boot/loader/entries/arch.conf
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=UUID=${root_uuid} rw
+EOF
+    
     echo "=== Enabling services ==="
     systemctl enable systemd-networkd
     systemctl enable systemd-resolved
