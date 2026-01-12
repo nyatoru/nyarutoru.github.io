@@ -113,7 +113,7 @@ function main() {
     cd /tmp
     
     echo "=== Downloading Arch Linux bootstrap ==="
-    curl -fSsL https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
+    curl -fSsL https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
     
     # Verify download
     if [ ! -s /tmp/archlinux.tar.zst ]; then
@@ -284,10 +284,6 @@ EOF
     
     ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
     hwclock --systohc || true
-    
-    # Fix resolv.conf symlink
-    rm -f /etc/resolv.conf
-    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
     echo "=== Configuring SSH ==="
     mkdir -p /root/.ssh
