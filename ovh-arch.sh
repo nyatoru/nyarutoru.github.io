@@ -262,34 +262,19 @@ function finalize() {
     # Install GRUB for UEFI
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
     grub-mkconfig -o /boot/grub/grub.cfg
-    
-    echo "=== Installing additional packages ==="
-    pacman --noconfirm -S vim kitty-terminfo
 
     echo "=== Enabling services ==="
-    # Network
     systemctl enable systemd-networkd
     systemctl enable systemd-resolved
     systemctl enable systemd-timesyncd
     systemctl enable sshd
 
-    echo "=== Updating system ==="
-    pacman -Syu --noconfirm
-
     echo "=== Configuring locale ==="
-    # Locale
     echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
     echo "LANG=en_US.UTF-8" >> /etc/locale.conf
     locale-gen
 
-    echo "=== Setting up pacman mirrors ==="
-    # Pacman mirrors - use faster/more reliable mirrors for your region
-    pacman --noconfirm -S rsync reflector
-    # Increase timeout and use closer mirrors
-    reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist --connection-timeout 10 2>&1 | grep -v "WARNING:" || true
-
     echo "=== Configuring hostname and timezone ==="
-    # Hostname and timezone
     echo "$hostname" > /etc/hostname
     cat << EOF > /etc/hosts
 127.0.0.1   localhost
@@ -298,14 +283,13 @@ function finalize() {
 EOF
     
     ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
-    hwclock --systohc
+    hwclock --systohc || true
     
     # Fix resolv.conf symlink
     rm -f /etc/resolv.conf
     ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
     echo "=== Configuring SSH ==="
-    # SSH configuration
     mkdir -p /root/.ssh
     chmod 700 /root/.ssh
     curl -fSsL "$AUTHORIZED_KEYS" > /root/.ssh/authorized_keys
@@ -316,7 +300,6 @@ EOF
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
     
     echo "=== Setting root password ==="
-    # Set a random root password as backup
     local root_pass=$(openssl rand -base64 32)
     echo "root:${root_pass}" | chpasswd
     echo "Root password: ${root_pass}" > /root/initial_password.txt
@@ -324,12 +307,8 @@ EOF
     echo "Random root password has been set and saved to /root/initial_password.txt"
 
     echo "=== Building initramfs ==="
-    # initramfs
     touch /etc/vconsole.conf
     mkinitcpio -P
-    
-    echo "=== Cleaning up ==="
-    pacman -Sc --noconfirm
     
     echo "Finalization complete!"
 }
