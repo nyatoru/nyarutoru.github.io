@@ -256,17 +256,11 @@ EOF
 }
 
 function do_pacstrap() {
-    echo "=== Initializing pacman keyring first ==="
+    echo "=== Updating ==="
+    pacman -Syu --noconfirm
+    
+    echo "=== Initializing pacman keyring ==="
     pacman-key --init
-    pacman-key --populate archlinux
-    
-    echo "=== Refreshing package databases ==="
-    pacman -Sy --noconfirm
-    
-    echo "=== Updating archlinux-keyring ==="
-    pacman -S --noconfirm archlinux-keyring
-    
-    echo "=== Re-populating keyring after update ==="
     pacman-key --populate archlinux
     
     echo "=== Installing base system ==="
