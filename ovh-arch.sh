@@ -127,7 +127,7 @@ function main() {
     sleep 2
 
     echo "=== Partitioning disk ==="
-    sgdisk -n 1:2048:+256M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
+    sgdisk -n 1:2048:+512M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
     sgdisk -n 2:0:0 -c 2:"Linux Root" -t 2:8300 "$DISK"
 
     echo "=== Verifying partition table ==="
@@ -260,9 +260,11 @@ function do_pacstrap() {
     pacman-key --init
     pacman-key --populate archlinux
     
-    echo "=== Installing base system ==="
-    # ลบ grub และ efibootmgr ออก
-    pacstrap /mnt base linux linux-firmware openssh
+    echo "=== Updating package database ==="
+    pacman -Sy
+    
+    echo "=== Installing base system to /mnt ==="
+    pacman -r /mnt -Sy --noconfirm base linux linux-firmware openssh
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -289,7 +291,7 @@ function finalize() {
     # สร้าง loader configuration
     cat << EOF > /boot/loader/loader.conf
 default arch.conf
-timeout 2
+timeout 1
 console-mode max
 editor no
 EOF
@@ -308,24 +310,6 @@ initrd  /initramfs-linux.img
 options root=UUID=${root_uuid} rw
 EOF
     chmod 600 /boot/loader/entries/arch.conf
-    
-    echo "=== Installing sudo ==="
-    pacman -S --noconfirm sudo
-    
-    echo "=== Creating user nyarutoru ==="
-    useradd -m -G wheel -s /bin/bash nyarutoru
-    
-    echo "=== Setting up SSH keys for nyarutoru ==="
-    mkdir -p /home/nyarutoru/.ssh
-    chmod 700 /home/nyarutoru/.ssh
-    curl -fSsL "$AUTHORIZED_KEYS" > /home/nyarutoru/.ssh/authorized_keys
-    chmod 600 /home/nyarutoru/.ssh/authorized_keys
-    chown -R nyarutoru:nyarutoru /home/nyarutoru/.ssh
-    
-    echo "=== Configuring sudo ==="
-    # อนุญาตให้ wheel group ใช้ sudo โดยไม่ต้องใส่รหัสผ่าน
-    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/wheel
-    chmod 440 /etc/sudoers.d/wheel
     
     echo "=== Enabling services ==="
     systemctl enable systemd-networkd
@@ -350,35 +334,26 @@ EOF
     hwclock --systohc || true
 
     echo "=== Configuring SSH ==="
-    # ปิดการ login ด้วย root
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    # ปิดการ login ด้วย password
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    curl -fSsL "$AUTHORIZED_KEYS" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-    sed -i 's/PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-    # บังคับใช้ public key เท่านั้น
-    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
     
     echo "=== Setting root password ==="
-    local root_pass=$(openssl rand -base64 32)
+    local root_pass=$(openssl rand -base64 64)
     echo "root:${root_pass}" | chpasswd
     echo "Root password: ${root_pass}" > /root/initial_password.txt
     chmod 600 /root/initial_password.txt
     echo "Random root password has been set and saved to /root/initial_password.txt"
-    echo "Note: Root SSH login is disabled. Use user 'nyarutoru' instead."
 
     echo "=== Building initramfs ==="
     touch /etc/vconsole.conf
     mkinitcpio -P
     
     echo "Finalization complete!"
-    echo ""
-    echo "User configuration:"
-    echo "  Username: nyarutoru"
-    echo "  Groups: wheel (sudo access)"
-    echo "  Auth: SSH key only (password login disabled)"
-    echo "  Sudo: No password required"
-    echo "  Root SSH: Disabled"
 }
 
 case "$ACTION" in
