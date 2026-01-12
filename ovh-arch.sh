@@ -283,9 +283,10 @@ function finalize() {
     locale-gen
 
     echo "=== Setting up pacman mirrors ==="
-    # Pacman mirrors
+    # Pacman mirrors - use faster/more reliable mirrors for your region
     pacman --noconfirm -S rsync reflector
-    reflector --latest 20 --sort rate --save /etc/pacman.d/mirrorlist
+    # Increase timeout and use closer mirrors
+    reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist --connection-timeout 10 2>&1 | grep -v "WARNING:" || true
 
     echo "=== Configuring hostname and timezone ==="
     # Hostname and timezone
@@ -298,6 +299,9 @@ EOF
     
     ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
     hwclock --systohc
+    
+    # Fix resolv.conf symlink
+    rm -f /etc/resolv.conf
     ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
     echo "=== Configuring SSH ==="
