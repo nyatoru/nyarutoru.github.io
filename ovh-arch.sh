@@ -105,7 +105,7 @@ function main() {
     cd /tmp
     
     echo "=== Downloading Arch Linux bootstrap ==="
-    curl -fSsL https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
+    curl -fSsL https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
     
     if [ ! -s /tmp/archlinux.tar.zst ]; then
         echo "Error: Failed to download Arch Linux bootstrap" >&2
@@ -229,7 +229,7 @@ function do_pacstrap() {
     pacman-key --populate archlinux
     
     echo "=== Installing base system ==="
-    pacstrap /mnt base linux-lts linux-firmware openssh grub efibootmgr
+    pacstrap /mnt base linux linux-firmware openssh grub efibootmgr
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
