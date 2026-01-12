@@ -24,7 +24,6 @@ ipv6_gateway=""
 get_network_info() {
     echo "=== Detecting network configuration ==="
     
-    # Get the default route interface. This is typically the primary interface.
     local iface=$(ip -4 route | grep default | sed -e "s/^.*dev \([^ ]*\) .*$/\1/" | head -n1)
     if [ -z "$iface" ]; then
         echo "Could not determine default IPv4 interface." >&2
@@ -32,7 +31,6 @@ get_network_info() {
     fi
     echo "Default interface: $iface"
 
-    # Get the IP address and prefix for that interface
     local ip_info=$(ip -4 addr show dev "$iface" | grep "inet " | awk '{print $2}' | head -n1)
     if [ -z "$ip_info" ]; then
         echo "Could not determine IPv4 address for interface $iface." >&2
@@ -41,7 +39,6 @@ get_network_info() {
     ipv4_address=$(echo "$ip_info" | cut -d'/' -f1)
     ipv4_prefix=$(echo "$ip_info" | cut -d'/' -f2)
 
-    # Get the gateway from the default route
     ipv4_gateway=$(ip -4 route | grep default | awk '{print $3}' | head -n1)
     if [ -z "$ipv4_gateway" ]; then
         echo "Could not determine default IPv4 gateway." >&2
@@ -51,17 +48,15 @@ get_network_info() {
     echo "IPv4 Prefix: $ipv4_prefix"
     echo "IPv4 Gateway: $ipv4_gateway"
 
-    # IPv6 detection
     echo "Detecting IPv6 configuration..."
     ipv6_address=$(ip -6 route 2>/dev/null | grep -v "^fe80" | grep -v "^ff00" | head -n1 | cut -f1 -d" " || echo "")
     
-    if [ -z "$ipv6_address" ]; then
+    if [ -z "$ipv6_address" ] || [ "$ipv6_address" = "::1" ]; then
         echo "Warning: No IPv6 address found"
         ipv6_gateway=""
     else
         echo "IPv6 Address found: $ipv6_address"
         
-        # Try to get gateway from cloud-init
         if [ -f /etc/network/interfaces.d/50-cloud-init ]; then
             local ipv6_gateway_info=$(grep -i "gateway" /etc/network/interfaces.d/50-cloud-init 2>/dev/null | grep -v "^#" | grep ":" | head -n1 | awk '{print $NF}' || echo "")
             if [ -n "$ipv6_gateway_info" ]; then
@@ -73,7 +68,6 @@ get_network_info() {
             fi
         else
             echo "Warning: /etc/network/interfaces.d/50-cloud-init not found"
-            # Try alternative method
             ipv6_gateway=$(ip -6 route 2>/dev/null | grep "^default" | awk '{print $3}' || echo "")
             if [ -n "$ipv6_gateway" ]; then
                 echo "IPv6 Gateway (from routing table): $ipv6_gateway"
@@ -97,13 +91,11 @@ function main() {
     echo "Target disk: $DISK"
     echo "Hostname: $ACTION"
     
-    # Check if disk exists
     if [ ! -b "$DISK" ]; then
         echo "Error: Disk $DISK does not exist" >&2
         exit 1
     fi
     
-    # Warn if disk is mounted
     if mount | grep -q "$DISK"; then
         echo "Warning: $DISK has mounted partitions. Unmounting..."
         umount ${DISK}* 2>/dev/null || true
@@ -113,20 +105,16 @@ function main() {
     cd /tmp
     
     echo "=== Downloading Arch Linux bootstrap ==="
-    curl -fSsL https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
+    curl -fSsL https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
     
-    # Verify download
     if [ ! -s /tmp/archlinux.tar.zst ]; then
         echo "Error: Failed to download Arch Linux bootstrap" >&2
         exit 1
     fi
 
     echo "=== Preparing disk ==="
-    # Unmount everything related to target disk
     umount ${DISK}* 2>/dev/null || true
     swapoff ${DISK}* 2>/dev/null || true
-    
-    # Clean disk
     wipefs -af "$DISK" 2>/dev/null || true
 
     echo "=== Partitioning disk ==="
@@ -134,13 +122,11 @@ function main() {
     sgdisk -n 1:2048:+512M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
     sgdisk -n 2:0:0 --typecode=2:8300 --change-name=2:"Linux Root" "$DISK"
     
-    # Force kernel to re-read partition table
     echo "=== Reloading partition table ==="
     partprobe "$DISK" 2>/dev/null || true
     blockdev --rereadpt "$DISK" 2>/dev/null || true
     sleep 3
     
-    # Wait for device nodes to appear
     for i in {1..10}; do
         if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
             echo "✓ Partitions ready"
@@ -150,7 +136,6 @@ function main() {
         sleep 1
     done
     
-    # Final check
     if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
         echo "Error: Partition devices not found" >&2
         ls -l /dev/sd* >&2
@@ -169,10 +154,7 @@ function main() {
     cd /bootstrap
     tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
     
-    # Mount root partition to /bootstrap/mnt
     mount "${DISK}2" /bootstrap/mnt
-    
-    # Create and mount EFI partition
     mkdir -p /bootstrap/mnt/boot/efi
     mount "${DISK}1" /bootstrap/mnt/boot/efi
 
@@ -180,6 +162,7 @@ function main() {
     sed -i -e 's@#Server = https://mirror.rackspace.com@Server = https://mirror.rackspace.com@' /bootstrap/etc/pacman.d/mirrorlist
     sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
     cp "$SCRIPT_PATH" /bootstrap/root/bootstrap.sh
+    chmod +x /bootstrap/root/bootstrap.sh
     
     echo "=== Running pacstrap ==="
     cd /
@@ -259,7 +242,6 @@ function finalize() {
     sed -i -e 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
     sed -i -e 's/GRUB_CMDLINE_LINUX_DEFAULT.*/GRUB_CMDLINE_LINUX_DEFAULT=""/' /etc/default/grub
     
-    # Install GRUB for UEFI
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
     grub-mkconfig -o /boot/grub/grub.cfg
 
@@ -291,7 +273,6 @@ EOF
     curl -fSsL "$AUTHORIZED_KEYS" > /root/.ssh/authorized_keys
     chmod 600 /root/.ssh/authorized_keys
     
-    # Harden SSH
     sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
     
