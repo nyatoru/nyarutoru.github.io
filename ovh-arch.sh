@@ -191,7 +191,7 @@ function main() {
     mount "${DISK}1" /bootstrap/mnt/boot
 
     echo "=== Configuring pacman ==="
-    sed -i -e 's@#Server = https://mirror.rackspace.com@Server = https://mirror.rackspace.com@' /bootstrap/etc/pacman.d/mirrorlist
+    echo 'Server = https://mirror.pkgbuild.com/$repo/os/$arch' > /bootstrap/etc/pacman.d/mirrorlist
     sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
     cp "$SCRIPT_PATH" /bootstrap/root/bootstrap.sh
     chmod +x /bootstrap/root/bootstrap.sh
@@ -273,6 +273,10 @@ function finalize() {
     
     echo "=== Installing systemd-boot ==="
     bootctl install
+    
+    echo "=== Fixing boot partition permissions ==="
+    chmod 700 /boot
+    chmod 600 /boot/loader/.bootctl-random-seed 2>/dev/null || true
     
     echo "=== Configuring systemd-boot ==="
     # สร้าง loader configuration
