@@ -115,37 +115,69 @@ function main() {
     echo "=== Preparing disk ==="
     umount ${DISK}* 2>/dev/null || true
     swapoff ${DISK}* 2>/dev/null || true
-    wipefs -af "$DISK" 2>/dev/null || true
+
+    # ลบ partition table เก่าทั้งหมดก่อน
+    echo "=== Wiping disk completely ==="
+    dd if=/dev/zero of="$DISK" bs=512 count=10000 2>/dev/null || true
+    wipefs -af "$DISK"
+    sgdisk --zap-all "$DISK"
+
+    # บังคับให้ kernel อ่าน partition table ใหม่
+    partprobe "$DISK"
+    sleep 2
 
     echo "=== Partitioning disk ==="
-    sgdisk --zap-all "$DISK"
     sgdisk -n 1:2048:+512M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
-    sgdisk -n 2:0:0 --typecode=2:8300 --change-name=2:"Linux Root" "$DISK"
-    
-    echo "=== Reloading partition table ==="
-    partprobe "$DISK" 2>/dev/null || true
-    blockdev --rereadpt "$DISK" 2>/dev/null || true
-    sleep 3
-    
-    for i in {1..10}; do
+    sgdisk -n 2:0:0 -c 2:"Linux Root" -t 2:8300 "$DISK"
+
+    echo "=== Verifying partition table ==="
+    sgdisk -p "$DISK"
+
+    echo "=== Forcing kernel to re-read partition table ==="
+    # ใช้หลายวิธีเพื่อให้แน่ใจ
+    partprobe "$DISK"
+    blockdev --rereadpt "$DISK"
+    # บังคับให้ udev ประมวลผล
+    udevadm settle --timeout=10
+
+    # รอให้ partition devices ปรากฏ
+    echo "=== Waiting for partition devices ==="
+    for i in {1..20}; do
+        # ตรวจสอบว่ามีทั้ง 2 partitions และไม่มี partition แปลกปลอม
         if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
-            echo "✓ Partitions ready"
-            break
+            # ตรวจสอบว่าไม่มี sdb14, sdb15 ค้างอยู่
+            if [ ! -b "${DISK}14" ] && [ ! -b "${DISK}15" ]; then
+                echo "✓ Partitions ready (${DISK}1, ${DISK}2)"
+                break
+            else
+                echo "Warning: Old partitions still present, forcing cleanup..."
+                wipefs -af "${DISK}14" 2>/dev/null || true
+                wipefs -af "${DISK}15" 2>/dev/null || true
+                partprobe "$DISK"
+                udevadm settle --timeout=5
+            fi
         fi
-        echo "Waiting for partitions... ($i/10)"
+        echo "Waiting for partitions... ($i/20)"
         sleep 1
     done
-    
+
     if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
         echo "Error: Partition devices not found" >&2
+        echo "Expected: ${DISK}1 and ${DISK}2" >&2
+        echo "Current state:" >&2
         ls -l /dev/sd* >&2
+        sgdisk -p "$DISK" >&2
         exit 1
     fi
-    
+
+    # ตรวจสอบว่าไม่มี partition เก่าค้าง
+    if [ -b "${DISK}14" ] || [ -b "${DISK}15" ]; then
+        echo "Warning: Old partition entries still exist, but proceeding with ${DISK}1 and ${DISK}2" >&2
+    fi
+
     echo "=== Formatting partitions ==="
     mkfs.fat -F32 "${DISK}1"
     mkfs.ext4 -F "${DISK}2"
-    sgdisk -p "$DISK"
 
     echo "=== Setting up bootstrap environment ==="
     mkdir -p /bootstrap
@@ -155,8 +187,8 @@ function main() {
     tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
     
     mount "${DISK}2" /bootstrap/mnt
-    mkdir -p /bootstrap/mnt/boot/efi
-    mount "${DISK}1" /bootstrap/mnt/boot/efi
+    mkdir -p /bootstrap/mnt/boot
+    mount "${DISK}1" /bootstrap/mnt/boot
 
     echo "=== Configuring pacman ==="
     sed -i -e 's@#Server = https://mirror.rackspace.com@Server = https://mirror.rackspace.com@' /bootstrap/etc/pacman.d/mirrorlist
@@ -202,7 +234,7 @@ EOF
     echo "=== Cleaning up ==="
     rm /bootstrap/root/bootstrap.sh
     sync
-    umount /bootstrap/mnt/boot/efi
+    umount /bootstrap/mnt/boot
     umount /bootstrap/mnt
     umount /bootstrap
     
