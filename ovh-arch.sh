@@ -121,10 +121,41 @@ function main() {
         exit 1
     fi
 
+    echo "=== Preparing disk ==="
+    # Unmount everything related to target disk
+    umount ${DISK}* 2>/dev/null || true
+    swapoff ${DISK}* 2>/dev/null || true
+    
+    # Clean disk
+    wipefs -af "$DISK" 2>/dev/null || true
+
     echo "=== Partitioning disk ==="
     sgdisk --zap-all "$DISK"
     sgdisk -n 1:2048:+512M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
     sgdisk -n 2:0:0 --typecode=2:8300 --change-name=2:"Linux Root" "$DISK"
+    
+    # Force kernel to re-read partition table
+    echo "=== Reloading partition table ==="
+    partprobe "$DISK" 2>/dev/null || true
+    blockdev --rereadpt "$DISK" 2>/dev/null || true
+    sleep 3
+    
+    # Wait for device nodes to appear
+    for i in {1..10}; do
+        if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
+            echo "✓ Partitions ready"
+            break
+        fi
+        echo "Waiting for partitions... ($i/10)"
+        sleep 1
+    done
+    
+    # Final check
+    if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
+        echo "Error: Partition devices not found" >&2
+        ls -l /dev/sd* >&2
+        exit 1
+    fi
     
     echo "=== Formatting partitions ==="
     mkfs.fat -F32 "${DISK}1"
@@ -158,7 +189,7 @@ function main() {
     /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION"
 
     echo "=== Configuring network ==="
-    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ]; then
+    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
         cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
 [Match]
 Name=en*
@@ -198,7 +229,7 @@ EOF
     echo "======================================"
     echo "Hostname: $ACTION"
     echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
-    if [ -n "$ipv6_gateway" ]; then
+    if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
         echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
     fi
     echo ""
