@@ -81,6 +81,150 @@ get_network_info() {
     echo "---"
 }
 
+prepare_disk() {
+    echo "=== Preparing disk ==="
+    umount ${DISK}* 2>/dev/null || true
+    swapoff ${DISK}* 2>/dev/null || true
+
+    echo "=== Wiping disk completely ==="
+    dd if=/dev/zero of="$DISK" bs=512 count=10000 2>/dev/null || true
+    wipefs -af "$DISK"
+    sgdisk --zap-all "$DISK"
+
+    partprobe "$DISK"
+    sleep 2
+
+    echo "=== Partitioning disk ==="
+    sgdisk -n 1:2048:+256M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
+    sgdisk -n 2:0:0 -c 2:"Linux Root" -t 2:8300 "$DISK"
+
+    echo "=== Verifying partition table ==="
+    sgdisk -p "$DISK"
+
+    echo "=== Forcing kernel to re-read partition table ==="
+    partprobe "$DISK"
+    blockdev --rereadpt "$DISK"
+    udevadm settle --timeout=10
+
+    echo "=== Waiting for partition devices ==="
+    for i in {1..20}; do
+        if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
+            if [ ! -b "${DISK}14" ] && [ ! -b "${DISK}15" ]; then
+                echo "✓ Partitions ready (${DISK}1, ${DISK}2)"
+                break
+            else
+                echo "Warning: Old partitions still present, forcing cleanup..."
+                wipefs -af "${DISK}14" 2>/dev/null || true
+                wipefs -af "${DISK}15" 2>/dev/null || true
+                partprobe "$DISK"
+                udevadm settle --timeout=5
+            fi
+        fi
+        echo "Waiting for partitions... ($i/20)"
+        sleep 1
+    done
+
+    if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
+        echo "Error: Partition devices not found" >&2
+        echo "Expected: ${DISK}1 and ${DISK}2" >&2
+        echo "Current state:" >&2
+        ls -l /dev/sd* >&2
+        sgdisk -p "$DISK" >&2
+        exit 1
+    fi
+
+    if [ -b "${DISK}14" ] || [ -b "${DISK}15" ]; then
+        echo "Warning: Old partition entries still exist, but proceeding with ${DISK}1 and ${DISK}2" >&2
+    fi
+
+    echo "=== Formatting partitions ==="
+    mkfs.fat -F32 "${DISK}1"
+    mkfs.ext4 -F "${DISK}2"
+}
+
+setup_bootstrap() {
+    echo "=== Setting up bootstrap environment ==="
+    mkdir -p /bootstrap
+    mount -t tmpfs tmpfs /bootstrap
+    mount "${DISK}2" /bootstrap
+    cd /bootstrap
+    tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
+    
+    mount "${DISK}2" /bootstrap/mnt
+    mkdir -p /bootstrap/mnt/boot
+    mount "${DISK}1" /bootstrap/mnt/boot
+
+    echo "=== Configuring pacman ==="
+    echo 'Server = https://mirror.pkgbuild.com/$repo/os/$arch' > /bootstrap/etc/pacman.d/mirrorlist
+    sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
+    cp "$SCRIPT_PATH" /bootstrap/root/bootstrap.sh
+    chmod +x /bootstrap/root/bootstrap.sh
+}
+
+configure_network() {
+    echo "=== Configuring network ==="
+    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+Address=${ipv6_address}/${ipv6_prefix}
+Gateway=${ipv6_gateway}
+DNS=1.1.1.1
+DNS=8.8.8.8
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+EOF
+    else
+        echo "IPv6 not configured, using IPv4 only"
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+DNS=1.1.1.1
+DNS=8.8.8.8
+EOF
+    fi
+}
+
+cleanup() {
+    echo "=== Cleaning up ==="
+    rm /bootstrap/root/bootstrap.sh
+    sync
+    umount /bootstrap/mnt/boot
+    umount /bootstrap/mnt
+    umount /bootstrap
+}
+
+print_summary() {
+    echo ""
+    echo "======================================"
+    echo "Installation completed successfully!"
+    echo "======================================"
+    echo "Hostname: $ACTION"
+    echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
+    if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
+        echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
+    fi
+    echo ""
+    echo "User configuration:"
+    echo "  Username: nyarutoru"
+    echo "  Groups: wheel (sudo access)"
+    echo "  Auth: SSH key only"
+    echo "  Sudo: No password required"
+    echo "  Root SSH: Disabled"
+    echo ""
+    echo "Install log saved to: /tmp/install.log"
+    echo ""
+    echo "Now reboot the VPS from the OVH control panel"
+    echo "After reboot, you can login via SSH as root"
+    echo "======================================"
+}
+
 function main() {
     if [[ -z "$ACTION" ]]; then
         echo "Usage: $0 <hostname>"
@@ -112,89 +256,8 @@ function main() {
         exit 1
     fi
 
-    echo "=== Preparing disk ==="
-    umount ${DISK}* 2>/dev/null || true
-    swapoff ${DISK}* 2>/dev/null || true
-
-    # ลบ partition table เก่าทั้งหมดก่อน
-    echo "=== Wiping disk completely ==="
-    dd if=/dev/zero of="$DISK" bs=512 count=10000 2>/dev/null || true
-    wipefs -af "$DISK"
-    sgdisk --zap-all "$DISK"
-
-    # บังคับให้ kernel อ่าน partition table ใหม่
-    partprobe "$DISK"
-    sleep 2
-
-    echo "=== Partitioning disk ==="
-    sgdisk -n 1:2048:+256M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
-    sgdisk -n 2:0:0 -c 2:"Linux Root" -t 2:8300 "$DISK"
-
-    echo "=== Verifying partition table ==="
-    sgdisk -p "$DISK"
-
-    echo "=== Forcing kernel to re-read partition table ==="
-    # ใช้หลายวิธีเพื่อให้แน่ใจ
-    partprobe "$DISK"
-    blockdev --rereadpt "$DISK"
-    # บังคับให้ udev ประมวลผล
-    udevadm settle --timeout=10
-
-    # รอให้ partition devices ปรากฏ
-    echo "=== Waiting for partition devices ==="
-    for i in {1..20}; do
-        # ตรวจสอบว่ามีทั้ง 2 partitions และไม่มี partition แปลกปลอม
-        if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
-            # ตรวจสอบว่าไม่มี sdb14, sdb15 ค้างอยู่
-            if [ ! -b "${DISK}14" ] && [ ! -b "${DISK}15" ]; then
-                echo "✓ Partitions ready (${DISK}1, ${DISK}2)"
-                break
-            else
-                echo "Warning: Old partitions still present, forcing cleanup..."
-                wipefs -af "${DISK}14" 2>/dev/null || true
-                wipefs -af "${DISK}15" 2>/dev/null || true
-                partprobe "$DISK"
-                udevadm settle --timeout=5
-            fi
-        fi
-        echo "Waiting for partitions... ($i/20)"
-        sleep 1
-    done
-
-    if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
-        echo "Error: Partition devices not found" >&2
-        echo "Expected: ${DISK}1 and ${DISK}2" >&2
-        echo "Current state:" >&2
-        ls -l /dev/sd* >&2
-        sgdisk -p "$DISK" >&2
-        exit 1
-    fi
-
-    # ตรวจสอบว่าไม่มี partition เก่าค้าง
-    if [ -b "${DISK}14" ] || [ -b "${DISK}15" ]; then
-        echo "Warning: Old partition entries still exist, but proceeding with ${DISK}1 and ${DISK}2" >&2
-    fi
-
-    echo "=== Formatting partitions ==="
-    mkfs.fat -F32 "${DISK}1"
-    mkfs.ext4 -F "${DISK}2"
-
-    echo "=== Setting up bootstrap environment ==="
-    mkdir -p /bootstrap
-    mount -t tmpfs tmpfs /bootstrap
-    mount "${DISK}2" /bootstrap
-    cd /bootstrap
-    tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
-    
-    mount "${DISK}2" /bootstrap/mnt
-    mkdir -p /bootstrap/mnt/boot
-    mount "${DISK}1" /bootstrap/mnt/boot
-
-    echo "=== Configuring pacman ==="
-    echo 'Server = https://mirror.pkgbuild.com/$repo/os/$arch' > /bootstrap/etc/pacman.d/mirrorlist
-    sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
-    cp "$SCRIPT_PATH" /bootstrap/root/bootstrap.sh
-    chmod +x /bootstrap/root/bootstrap.sh
+    prepare_disk
+    setup_bootstrap
     
     echo "=== Running pacstrap ==="
     cd /
@@ -203,56 +266,9 @@ function main() {
     echo "=== Finalizing installation ==="
     /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION"
 
-    echo "=== Configuring network ==="
-    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
-[Match]
-Name=en*
-
-[Network]
-DHCP=ipv4
-Address=${ipv6_address}/${ipv6_prefix}
-Gateway=${ipv6_gateway}
-DNS=1.1.1.1
-DNS=8.8.8.8
-DNS=2606:4700:4700::1111
-DNS=2001:4860:4860::8888
-EOF
-    else
-        echo "IPv6 not configured, using IPv4 only"
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
-[Match]
-Name=en*
-
-[Network]
-DHCP=ipv4
-DNS=1.1.1.1
-DNS=8.8.8.8
-EOF
-    fi
-
-    echo "=== Cleaning up ==="
-    rm /bootstrap/root/bootstrap.sh
-    sync
-    umount /bootstrap/mnt/boot
-    umount /bootstrap/mnt
-    umount /bootstrap
-    
-    echo ""
-    echo "======================================"
-    echo "Installation completed successfully!"
-    echo "======================================"
-    echo "Hostname: $ACTION"
-    echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
-    if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
-        echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
-    fi
-    echo ""
-    echo "Install log saved to: /tmp/install.log"
-    echo ""
-    echo "Now reboot the VPS from the OVH control panel"
-    echo "After reboot, you can login via SSH as root"
-    echo "======================================"
+    configure_network
+    cleanup
+    print_summary
 }
 
 function do_pacstrap() {
@@ -264,7 +280,8 @@ function do_pacstrap() {
     pacman -Sy
     
     echo "=== Installing base system to /mnt ==="
-    pacman -r /mnt -Sy --noconfirm base linux linux-firmware openssh mkinitcpio
+    pacman -r /mnt --cachedir=/mnt/var/cache/pacman/pkg -Sy --noconfirm \
+        base linux linux-firmware openssh mkinitcpio
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -274,7 +291,6 @@ function finalize() {
     local hostname="$1"
     
     echo "=== Setting boot partition permissions ==="
-    # ตั้งค่า umask ให้เข้มงวดก่อน
     umask 077
     chmod 700 /boot
     
@@ -288,7 +304,6 @@ function finalize() {
     find /boot -type d -exec chmod 700 {} \; 2>/dev/null || true
     
     echo "=== Configuring systemd-boot ==="
-    # สร้าง loader configuration
     cat << EOF > /boot/loader/loader.conf
 default arch.conf
 timeout 2
@@ -297,10 +312,8 @@ editor no
 EOF
     chmod 600 /boot/loader/loader.conf
     
-    # หา root partition UUID
     local root_uuid=$(blkid -s UUID -o value ${DISK}2)
     
-    # สร้าง boot entry
     mkdir -p /boot/loader/entries
     chmod 700 /boot/loader/entries
     cat << EOF > /boot/loader/entries/arch.conf
@@ -311,7 +324,8 @@ options root=UUID=${root_uuid} rw
 EOF
     chmod 600 /boot/loader/entries/arch.conf
     
-    echo "=== Installing sudo ==="
+    echo "=== Installing additional packages ==="
+    pacman -Sy --noconfirm
     pacman -S --noconfirm sudo
     
     echo "=== Creating user nyarutoru ==="
@@ -325,7 +339,6 @@ EOF
     chown -R nyarutoru:nyarutoru /home/nyarutoru/.ssh
     
     echo "=== Configuring sudo ==="
-    # อนุญาตให้ wheel group ใช้ sudo โดยไม่ต้องใส่รหัสผ่าน
     echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/wheel
     chmod 440 /etc/sudoers.d/wheel
     
@@ -352,13 +365,10 @@ EOF
     hwclock --systohc || true
 
     echo "=== Configuring SSH ==="
-    # ปิดการ login ด้วย root
     sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
     sed -i 's/PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    # ปิดการ login ด้วย password
     sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
     sed -i 's/PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-    # บังคับใช้ public key เท่านั้น
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
     
     echo "=== Setting root password ==="
@@ -369,18 +379,14 @@ EOF
     echo "Random root password has been set and saved to /root/initial_password.txt"
     echo "Note: Root SSH login is disabled. Use user 'nyarutoru' instead."
 
+    echo "=== Ensuring mkinitcpio presets exist ==="
+    pacman -S --noconfirm linux
+    
     echo "=== Building initramfs ==="
     touch /etc/vconsole.conf
     mkinitcpio -P
     
     echo "Finalization complete!"
-    echo ""
-    echo "User configuration:"
-    echo "  Username: nyarutoru"
-    echo "  Groups: wheel (sudo access)"
-    echo "  Auth: SSH key only (password login disabled)"
-    echo "  Sudo: No password required"
-    echo "  Root SSH: Disabled"
 }
 
 case "$ACTION" in
