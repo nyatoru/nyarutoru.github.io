@@ -271,12 +271,15 @@ function do_pacstrap() {
 function finalize() {
     local hostname="$1"
     
+    echo "=== Fixing boot partition permissions (before bootctl) ==="
+    chmod 700 /boot
+    
     echo "=== Installing systemd-boot ==="
     bootctl install
     
-    echo "=== Fixing boot partition permissions ==="
-    chmod 700 /boot
-    chmod 600 /boot/loader/.bootctl-random-seed 2>/dev/null || true
+    echo "=== Fixing random seed file permissions ==="
+    chmod 600 /boot/loader/.*random-seed* 2>/dev/null || true
+    find /boot/loader -name '*random-seed*' -type f -exec chmod 600 {} \; 2>/dev/null || true
     
     echo "=== Configuring systemd-boot ==="
     # สร้าง loader configuration
