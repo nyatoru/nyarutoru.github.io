@@ -22,15 +22,18 @@ ipv6_prefix="128"
 ipv6_gateway=""
 
 get_network_info() {
+    echo "=== Detecting network configuration ==="
+    
     # Get the default route interface. This is typically the primary interface.
-    local iface=$(ip -4 route | grep default | sed -e "s/^.*dev \([^ ]*\) .*$/\1/")
+    local iface=$(ip -4 route | grep default | sed -e "s/^.*dev \([^ ]*\) .*$/\1/" | head -n1)
     if [ -z "$iface" ]; then
         echo "Could not determine default IPv4 interface." >&2
         exit 1
     fi
+    echo "Default interface: $iface"
 
     # Get the IP address and prefix for that interface
-    local ip_info=$(ip -4 addr show dev "$iface" | grep "inet " | awk '{print $2}')
+    local ip_info=$(ip -4 addr show dev "$iface" | grep "inet " | awk '{print $2}' | head -n1)
     if [ -z "$ip_info" ]; then
         echo "Could not determine IPv4 address for interface $iface." >&2
         exit 1
@@ -39,7 +42,7 @@ get_network_info() {
     ipv4_prefix=$(echo "$ip_info" | cut -d'/' -f2)
 
     # Get the gateway from the default route
-    ipv4_gateway=$(ip -4 route | grep default | awk '{print $3}')
+    ipv4_gateway=$(ip -4 route | grep default | awk '{print $3}' | head -n1)
     if [ -z "$ipv4_gateway" ]; then
         echo "Could not determine default IPv4 gateway." >&2
         exit 1
@@ -48,22 +51,40 @@ get_network_info() {
     echo "IPv4 Prefix: $ipv4_prefix"
     echo "IPv4 Gateway: $ipv4_gateway"
 
-    # OVHCloud has very broken IPv6 networking. It doesnt have DHCP for IPv6
-    # and it doesnt support neighbor discovery protocol, so you have to set the
-    # prefix to 128 so that no nodes are treated as neighbors.
-    ipv6_address=$(ip -6 route | head -n1 | cut -f1 -d" ")
-    # read the gateway from the cloud-init file as the rescue env doesnt have IPv6
-    # routing enabled.
-    local ipv6_gateway_info=$(grep gw /etc/network/interfaces.d/50-cloud-init 2>/dev/null | head -n1 | tr -s ' ' | cut -d' ' -f7 || echo "")
-    if [ -z "$ipv6_gateway_info" ]; then
-        echo "Warning: Could not determine IPv6 gateway, IPv6 may not work after reboot"
+    # IPv6 detection
+    echo "Detecting IPv6 configuration..."
+    ipv6_address=$(ip -6 route 2>/dev/null | grep -v "^fe80" | grep -v "^ff00" | head -n1 | cut -f1 -d" " || echo "")
+    
+    if [ -z "$ipv6_address" ]; then
+        echo "Warning: No IPv6 address found"
         ipv6_gateway=""
     else
-        ipv6_gateway=$(echo "$ipv6_gateway_info" | cut -d'/' -f1)
-        echo "IPv6 Address: $ipv6_address"
-        echo "IPv6 Prefix: $ipv6_prefix"
-        echo "IPv6 Gateway: $ipv6_gateway"
+        echo "IPv6 Address found: $ipv6_address"
+        
+        # Try to get gateway from cloud-init
+        if [ -f /etc/network/interfaces.d/50-cloud-init ]; then
+            local ipv6_gateway_info=$(grep -i "gateway" /etc/network/interfaces.d/50-cloud-init 2>/dev/null | grep -v "^#" | grep ":" | head -n1 | awk '{print $NF}' || echo "")
+            if [ -n "$ipv6_gateway_info" ]; then
+                ipv6_gateway=$(echo "$ipv6_gateway_info" | cut -d'/' -f1)
+                echo "IPv6 Gateway: $ipv6_gateway"
+            else
+                echo "Warning: Could not determine IPv6 gateway from cloud-init"
+                ipv6_gateway=""
+            fi
+        else
+            echo "Warning: /etc/network/interfaces.d/50-cloud-init not found"
+            # Try alternative method
+            ipv6_gateway=$(ip -6 route 2>/dev/null | grep "^default" | awk '{print $3}' || echo "")
+            if [ -n "$ipv6_gateway" ]; then
+                echo "IPv6 Gateway (from routing table): $ipv6_gateway"
+            else
+                echo "Warning: Could not determine IPv6 gateway"
+            fi
+        fi
     fi
+    
+    echo "Network detection complete"
+    echo "---"
 }
 
 function main() {
