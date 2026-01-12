@@ -264,7 +264,7 @@ function do_pacstrap() {
     pacman -Sy
     
     echo "=== Installing base system to /mnt ==="
-    pacman -r /mnt -Sy --noconfirm base linux linux-firmware openssh
+    pacman -r /mnt -Sy --noconfirm base linux linux-firmware openssh mkinitcpio
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
