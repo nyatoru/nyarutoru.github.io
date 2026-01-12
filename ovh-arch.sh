@@ -256,14 +256,12 @@ EOF
 }
 
 function do_pacstrap() {
-    echo "=== Updating ==="
-    pacman -Syu --noconfirm
-    
     echo "=== Initializing pacman keyring ==="
     pacman-key --init
     pacman-key --populate archlinux
     
     echo "=== Installing base system ==="
+    # ลบ grub และ efibootmgr ออก
     pacstrap /mnt base linux linux-firmware openssh
     
     echo "=== Generating fstab ==="
