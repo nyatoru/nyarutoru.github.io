@@ -136,11 +136,13 @@ function main() {
     mount -t tmpfs tmpfs /bootstrap
     mount "${DISK}2" /bootstrap
     cd /bootstrap
-    tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1
+    tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
     
-    # Mount EFI partition
-    mkdir -p /bootstrap/mnt/boot/efi
+    # Mount root partition to /bootstrap/mnt
     mount "${DISK}2" /bootstrap/mnt
+    
+    # Create and mount EFI partition
+    mkdir -p /bootstrap/mnt/boot/efi
     mount "${DISK}1" /bootstrap/mnt/boot/efi
 
     echo "=== Configuring pacman ==="
@@ -156,8 +158,8 @@ function main() {
     /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION"
 
     echo "=== Configuring network ==="
-    # Network configuration - FIXED: Write to /mnt not /bootstrap
-    cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ]; then
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
 [Match]
 Name=en*
 
@@ -170,6 +172,18 @@ DNS=8.8.8.8
 DNS=2606:4700:4700::1111
 DNS=2001:4860:4860::8888
 EOF
+    else
+        echo "IPv6 not configured, using IPv4 only"
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+DNS=1.1.1.1
+DNS=8.8.8.8
+EOF
+    fi
 
     echo "=== Cleaning up ==="
     rm /bootstrap/root/bootstrap.sh
