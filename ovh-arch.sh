@@ -13,7 +13,7 @@ exec 1> >(tee /tmp/install.log)
 exec 2>&1
 
 ACTION="${1:-}"
-SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ipv4_address=""
 ipv4_prefix=""
 ipv4_gateway=""
