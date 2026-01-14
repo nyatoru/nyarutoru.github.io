@@ -212,25 +212,33 @@ finalize() {
     local password="$3"
     
     echo "=== Installing systemd-boot ==="
-    bootctl --path=/boot/efi install
+    bootctl --esp-path=/boot/efi install
     
     # Get root partition UUID
     local root_uuid=$(blkid -s UUID -o value ${DISK}2)
+    
+    echo "Root UUID: $root_uuid"
+    
+    # Create boot entry directory
+    mkdir -p /boot/efi/loader/entries
     
     # Create boot entry
     cat > /boot/efi/loader/entries/arch.conf << EOF
 title   Arch Linux
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=${root_uuid} rw
+options root=UUID=${root_uuid} rw quiet loglevel=3
 EOF
     
-    # Configure loader
+    # Configure loader - set timeout to 0 for instant boot
     cat > /boot/efi/loader/loader.conf << EOF
 default arch.conf
-timeout 2
-editor  no
+timeout 0
+console-mode keep
 EOF
+
+    echo "=== Updating systemd-boot ==="
+    bootctl update
 
     echo "=== Enabling services ==="
     systemctl enable systemd-networkd
