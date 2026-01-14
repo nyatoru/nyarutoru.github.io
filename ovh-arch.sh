@@ -13,6 +13,8 @@ exec 1> >(tee /tmp/install.log)
 exec 2>&1
 
 ACTION="${1:-}"
+USERNAME="${2:-}"
+PASSWORD="${3:-}"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ipv4_address=""
 ipv4_prefix=""
@@ -83,13 +85,28 @@ get_network_info() {
 
 function main() {
     if [[ -z "$ACTION" ]]; then
-        echo "Usage: $0 <hostname>"
+        echo "Usage: $0 <hostname> <username> <password>"
+        echo "Example: $0 myserver john MySecurePass123"
+        exit 1
+    fi
+    
+    if [[ -z "$USERNAME" ]]; then
+        echo "Error: Username is required"
+        echo "Usage: $0 <hostname> <username> <password>"
+        exit 1
+    fi
+    
+    if [[ -z "$PASSWORD" ]]; then
+        echo "Error: Password is required"
+        echo "Usage: $0 <hostname> <username> <password>"
         exit 1
     fi
     
     echo "=== Starting Arch Linux installation ==="
     echo "Target disk: $DISK"
     echo "Hostname: $ACTION"
+    echo "Username: $USERNAME"
+    echo "Password: [hidden]"
     
     if [ ! -b "$DISK" ]; then
         echo "Error: Disk $DISK does not exist" >&2
@@ -171,7 +188,7 @@ EOF
     /bootstrap/bin/arch-chroot /bootstrap /root/bootstrap.sh 'do_pacstrap'
     
     echo "=== Finalizing installation ==="
-    /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION"
+    /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION" "$USERNAME" "$PASSWORD"
 
     echo "=== Configuring network ==="
     if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
@@ -213,6 +230,7 @@ EOF
     echo "Installation completed successfully!"
     echo "======================================"
     echo "Hostname: $ACTION"
+    echo "Username: $USERNAME"
     echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
     if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
         echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
@@ -220,8 +238,10 @@ EOF
     echo ""
     echo "Install log saved to: /tmp/install.log"
     echo ""
+    echo "IMPORTANT: Root login is DISABLED"
+    echo "Login with: ssh $USERNAME@$ipv4_address"
+    echo ""
     echo "Now reboot the VPS from the OVH control panel"
-    echo "After reboot, you can login via SSH as root"
     echo "======================================"
 }
 
@@ -231,7 +251,7 @@ function do_pacstrap() {
     pacman-key --populate archlinux
     
     echo "=== Installing base system ==="
-    pacstrap /mnt base linux-lts linux-firmware openssh grub efibootmgr
+    pacstrap /mnt base linux linux-firmware openssh sudo
     
     echo "=== Generating fstab ==="
     genfstab -U /mnt >> /mnt/etc/fstab
@@ -239,13 +259,29 @@ function do_pacstrap() {
 
 function finalize() {
     local hostname="$1"
+    local username="$2"
+    local password="$3"
     
-    echo "=== Configuring GRUB ==="
-    sed -i -e 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
-    sed -i -e 's/GRUB_CMDLINE_LINUX_DEFAULT.*/GRUB_CMDLINE_LINUX_DEFAULT=""/' /etc/default/grub
+    echo "=== Installing systemd-boot ==="
+    bootctl --path=/boot/efi install
     
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-    grub-mkconfig -o /boot/grub/grub.cfg
+    # Get root partition UUID
+    local root_uuid=$(blkid -s UUID -o value /dev/sdb2)
+    
+    # Create boot entry
+    cat > /boot/efi/loader/entries/arch.conf << EOF
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=UUID=${root_uuid} rw
+EOF
+    
+    # Configure loader
+    cat > /boot/efi/loader/loader.conf << EOF
+default arch.conf
+timeout 2
+editor  no
+EOF
 
     echo "=== Enabling services ==="
     systemctl enable systemd-networkd
@@ -269,21 +305,43 @@ EOF
     ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
     hwclock --systohc || true
 
+    echo "=== Creating user: $username ==="
+    useradd -m -G wheel -s /bin/bash "$username"
+    echo "${username}:${password}" | chpasswd
+    
+    echo "=== Configuring sudo ==="
+    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+    
     echo "=== Configuring SSH ==="
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    curl -fSsL "$AUTHORIZED_KEYS" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
+    mkdir -p /home/${username}/.ssh
+    chmod 700 /home/${username}/.ssh
+    curl -fSsL "$AUTHORIZED_KEYS" > /home/${username}/.ssh/authorized_keys
+    chmod 600 /home/${username}/.ssh/authorized_keys
+    chown -R ${username}:${username} /home/${username}/.ssh
     
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     
-    echo "=== Setting root password ==="
-    local root_pass=$(openssl rand -base64 32)
-    echo "root:${root_pass}" | chpasswd
-    echo "Root password: ${root_pass}" > /root/initial_password.txt
-    chmod 600 /root/initial_password.txt
-    echo "Random root password has been set and saved to /root/initial_password.txt"
+    echo "=== Locking root account ==="
+    passwd -l root
+    
+    echo "=== User configuration saved ==="
+    cat > /home/${username}/login_info.txt << EOF
+Hostname: ${hostname}
+Username: ${username}
+Password: ${password}
+
+SSH Login:
+  ssh ${username}@<server-ip>
+
+To become root:
+  sudo -i
+
+Note: Root login is disabled for security.
+EOF
+    chmod 600 /home/${username}/login_info.txt
+    chown ${username}:${username} /home/${username}/login_info.txt
 
     echo "=== Building initramfs ==="
     touch /etc/vconsole.conf
