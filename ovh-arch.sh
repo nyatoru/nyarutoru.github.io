@@ -15,7 +15,7 @@ exec 2>&1
 ACTION="${1:-}"
 USERNAME="${2:-}"
 PASSWORD="${3:-}"
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+
 ipv4_address=""
 ipv4_prefix=""
 ipv4_gateway=""
@@ -180,72 +180,21 @@ function main() {
 Server = https://mirror.pkgbuild.com/$repo/os/$arch
 EOF
     sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
-    cp "$SCRIPT_PATH" /bootstrap/root/bootstrap.sh
-    chmod +x /bootstrap/root/bootstrap.sh
     
-    echo "=== Running pacstrap ==="
-    cd /
-    /bootstrap/bin/arch-chroot /bootstrap /root/bootstrap.sh 'do_pacstrap'
-    
-    echo "=== Finalizing installation ==="
-    /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION" "$USERNAME" "$PASSWORD"
+    # Create bootstrap script inline
+    cat > /bootstrap/root/bootstrap.sh << 'INNERSCRIPT'
+#!/bin/bash
+set -o errexit
+set -o nounset
 
-    echo "=== Configuring network ==="
-    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
-[Match]
-Name=en*
+ACTION="$1"
+USERNAME="${2:-}"
+PASSWORD="${3:-}"
+TZ="Asia/Bangkok"
+DISK="/dev/sdb"
+AUTHORIZED_KEYS="https://raw.githubusercontent.com/nyatoru/nyarutoru.github.io/refs/heads/main/authorized_keys"
 
-[Network]
-DHCP=ipv4
-Address=${ipv6_address}/${ipv6_prefix}
-Gateway=${ipv6_gateway}
-DNS=1.1.1.1
-DNS=8.8.8.8
-DNS=2606:4700:4700::1111
-DNS=2001:4860:4860::8888
-EOF
-    else
-        echo "IPv6 not configured, using IPv4 only"
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
-[Match]
-Name=en*
-
-[Network]
-DHCP=ipv4
-DNS=1.1.1.1
-DNS=8.8.8.8
-EOF
-    fi
-
-    echo "=== Cleaning up ==="
-    rm /bootstrap/root/bootstrap.sh
-    sync
-    umount /bootstrap/mnt/boot/efi
-    umount /bootstrap/mnt
-    umount /bootstrap
-    
-    echo ""
-    echo "======================================"
-    echo "Installation completed successfully!"
-    echo "======================================"
-    echo "Hostname: $ACTION"
-    echo "Username: $USERNAME"
-    echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
-    if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
-        echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
-    fi
-    echo ""
-    echo "Install log saved to: /tmp/install.log"
-    echo ""
-    echo "IMPORTANT: Root login is DISABLED"
-    echo "Login with: ssh $USERNAME@$ipv4_address"
-    echo ""
-    echo "Now reboot the VPS from the OVH control panel"
-    echo "======================================"
-}
-
-function do_pacstrap() {
+do_pacstrap() {
     echo "=== Initializing pacman keyring ==="
     pacman-key --init
     pacman-key --populate archlinux
@@ -257,7 +206,7 @@ function do_pacstrap() {
     genfstab -U /mnt >> /mnt/etc/fstab
 }
 
-function finalize() {
+finalize() {
     local hostname="$1"
     local username="$2"
     local password="$3"
@@ -266,7 +215,7 @@ function finalize() {
     bootctl --path=/boot/efi install
     
     # Get root partition UUID
-    local root_uuid=$(blkid -s UUID -o value /dev/sdb2)
+    local root_uuid=$(blkid -s UUID -o value ${DISK}2)
     
     # Create boot entry
     cat > /boot/efi/loader/entries/arch.conf << EOF
@@ -352,14 +301,76 @@ EOF
 
 case "$ACTION" in
     do_pacstrap)
-        shift
-        do_pacstrap "$@"
+        do_pacstrap
         ;;
     finalize)
-        shift
-        finalize "$@"
-        ;;
-    *)
-        main
+        finalize "$USERNAME" "$PASSWORD" "$TZ"
         ;;
 esac
+INNERSCRIPT
+
+    chmod +x /bootstrap/root/bootstrap.sh
+    
+    echo "=== Running pacstrap ==="
+    cd /
+    /bootstrap/bin/arch-chroot /bootstrap /root/bootstrap.sh 'do_pacstrap'
+    
+    echo "=== Finalizing installation ==="
+    /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION" "$USERNAME" "$PASSWORD"
+
+    echo "=== Configuring network ==="
+    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+Address=${ipv6_address}/${ipv6_prefix}
+Gateway=${ipv6_gateway}
+DNS=1.1.1.1
+DNS=8.8.8.8
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+EOF
+    else
+        echo "IPv6 not configured, using IPv4 only"
+        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+[Match]
+Name=en*
+
+[Network]
+DHCP=ipv4
+DNS=1.1.1.1
+DNS=8.8.8.8
+EOF
+    fi
+
+    echo "=== Cleaning up ==="
+    rm /bootstrap/root/bootstrap.sh
+    sync
+    umount /bootstrap/mnt/boot/efi
+    umount /bootstrap/mnt
+    umount /bootstrap
+    
+    echo ""
+    echo "======================================"
+    echo "Installation completed successfully!"
+    echo "======================================"
+    echo "Hostname: $ACTION"
+    echo "Username: $USERNAME"
+    echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
+    if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
+        echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
+    fi
+    echo ""
+    echo "Install log saved to: /tmp/install.log"
+    echo ""
+    echo "IMPORTANT: Root login is DISABLED"
+    echo "Login with: ssh $USERNAME@$ipv4_address"
+    echo ""
+    echo "Now reboot the VPS from the OVH control panel"
+    echo "======================================"
+}
+
+main
