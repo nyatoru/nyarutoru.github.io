@@ -172,8 +172,10 @@ function main() {
     tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
     
     mount "${DISK}2" /bootstrap/mnt
-    mkdir -p /bootstrap/mnt/boot/efi
-    mount "${DISK}1" /bootstrap/mnt/boot/efi
+    
+    # Mount EFI partition to /boot (not /boot/efi)
+    mkdir -p /bootstrap/mnt/boot
+    mount "${DISK}1" /bootstrap/mnt/boot
 
     echo "=== Configuring pacman ==="
     cat > /bootstrap/etc/pacman.d/mirrorlist << 'EOF'
@@ -212,31 +214,40 @@ finalize() {
     local password="$3"
     
     echo "=== Installing systemd-boot ==="
-    bootctl --esp-path=/boot/efi install
+    bootctl --path=/boot install
     
     # Get root partition UUID
     local root_uuid=$(blkid -s UUID -o value ${DISK}2)
     
     echo "Root UUID: $root_uuid"
     
+    # Verify kernel files exist
+    echo "Checking kernel files:"
+    ls -lh /boot/vmlinuz-linux /boot/initramfs-linux.img
+    
     # Create boot entry directory
-    mkdir -p /boot/efi/loader/entries
+    mkdir -p /boot/loader/entries
     
     # Create boot entry
-    cat > /boot/efi/loader/entries/arch.conf << EOF
+    cat > /boot/loader/entries/arch.conf << EOF
 title   Arch Linux
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=${root_uuid} rw quiet loglevel=3
+options root=UUID=${root_uuid} rw
 EOF
     
-    # Configure loader - set timeout to 0 for instant boot
-    cat > /boot/efi/loader/loader.conf << EOF
+    # Configure loader
+    cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 0
 console-mode keep
 EOF
 
+    echo "=== Boot configuration ==="
+    cat /boot/loader/loader.conf
+    echo "---"
+    cat /boot/loader/entries/arch.conf
+    
     echo "=== Updating systemd-boot ==="
     bootctl update
 
@@ -357,7 +368,7 @@ EOF
     echo "=== Cleaning up ==="
     rm /bootstrap/root/bootstrap.sh
     sync
-    umount /bootstrap/mnt/boot/efi
+    umount /bootstrap/mnt/boot
     umount /bootstrap/mnt
     umount /bootstrap
     
