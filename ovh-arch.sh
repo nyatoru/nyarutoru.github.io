@@ -164,182 +164,171 @@ function main() {
     mkfs.ext4 -F "${DISK}2"
     sgdisk -p "$DISK"
 
-    echo "=== Setting up bootstrap environment ==="
-    mkdir -p /bootstrap
-    mount -t tmpfs tmpfs /bootstrap
-    mount "${DISK}2" /bootstrap
-    cd /bootstrap
-    tar xf /tmp/archlinux.tar.zst --numeric-owner --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
+    echo "=== Setting up root filesystem ==="
+    mkdir -p /mnt
+    mount "${DISK}2" /mnt
     
-    mount "${DISK}2" /bootstrap/mnt
+    # Mount EFI partition
+    mkdir -p /mnt/boot
+    mount "${DISK}1" /mnt/boot
     
-    # Mount EFI partition to /boot (not /boot/efi)
-    mkdir -p /bootstrap/mnt/boot
-    mount "${DISK}1" /bootstrap/mnt/boot
+    echo "=== Extracting base system ==="
+    cd /mnt
+    tar xf /tmp/archlinux.tar.zst --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
 
     echo "=== Configuring pacman ==="
-    cat > /bootstrap/etc/pacman.d/mirrorlist << 'EOF'
+    cat > /mnt/etc/pacman.d/mirrorlist << 'EOF'
 Server = https://mirror.pkgbuild.com/$repo/os/$arch
 EOF
-    sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /bootstrap/etc/pacman.conf
+    sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
     
-    # Create bootstrap script inline
-    cat > /bootstrap/root/bootstrap.sh << 'INNERSCRIPT'
+    echo "=== Preparing chroot environment ==="
+    mount --bind /dev /mnt/dev
+    mount --bind /dev/pts /mnt/dev/pts
+    mount -t proc /proc /mnt/proc
+    mount -t sysfs /sys /mnt/sys
+    mount -t tmpfs /tmp /mnt/tmp
+    
+    # Create installation script
+    cat > /mnt/root/install.sh << 'INSTALLSCRIPT'
 #!/bin/bash
 set -o errexit
 set -o nounset
 
-ACTION="$1"
-USERNAME="${2:-}"
-PASSWORD="${3:-}"
+HOSTNAME="$1"
+USERNAME="$2"
+PASSWORD="$3"
 TZ="Asia/Bangkok"
 DISK="/dev/sdb"
 AUTHORIZED_KEYS="https://raw.githubusercontent.com/nyatoru/nyarutoru.github.io/refs/heads/main/authorized_keys"
 
-do_pacstrap() {
-    echo "=== Initializing pacman keyring ==="
-    pacman-key --init
-    pacman-key --populate archlinux
-    
-    echo "=== Installing base system ==="
-    pacstrap /mnt base linux linux-firmware openssh sudo
-    
-    echo "=== Generating fstab ==="
-    genfstab -U /mnt >> /mnt/etc/fstab
-}
+echo "=== Initializing pacman keyring ==="
+pacman-key --init
+pacman-key --populate archlinux
 
-finalize() {
-    local hostname="$1"
-    local username="$2"
-    local password="$3"
-    
-    echo "=== Installing systemd-boot ==="
-    bootctl --path=/boot install
-    
-    # Get root partition UUID
-    local root_uuid=$(blkid -s UUID -o value ${DISK}2)
-    
-    echo "Root UUID: $root_uuid"
-    
-    # Verify kernel files exist
-    echo "Checking kernel files:"
-    ls -lh /boot/vmlinuz-linux /boot/initramfs-linux.img
-    
-    # Create boot entry directory
-    mkdir -p /boot/loader/entries
-    
-    # Create boot entry
-    cat > /boot/loader/entries/arch.conf << EOF
+echo "=== Installing packages ==="
+pacman -Sy --noconfirm base linux linux-firmware openssh sudo
+
+echo "=== Installing systemd-boot ==="
+bootctl --path=/boot install
+
+# Get root partition UUID
+root_uuid=$(blkid -s UUID -o value ${DISK}2)
+
+echo "Root UUID: $root_uuid"
+
+# Create boot entry directory
+mkdir -p /boot/loader/entries
+
+# Create boot entry
+cat > /boot/loader/entries/arch.conf << EOF
 title   Arch Linux
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
 options root=UUID=${root_uuid} rw
 EOF
-    
-    # Configure loader
-    cat > /boot/loader/loader.conf << EOF
+
+# Configure loader
+cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 0
 console-mode keep
 EOF
 
-    echo "=== Boot configuration ==="
-    cat /boot/loader/loader.conf
-    echo "---"
-    cat /boot/loader/entries/arch.conf
-    
-    echo "=== Updating systemd-boot ==="
-    bootctl update
+echo "=== Updating systemd-boot ==="
+bootctl update
 
-    echo "=== Enabling services ==="
-    systemctl enable systemd-networkd
-    systemctl enable systemd-resolved
-    systemctl enable systemd-timesyncd
-    systemctl enable sshd
+echo "=== Generating fstab ==="
+cat > /etc/fstab << EOF
+# /etc/fstab: static file system information
+UUID=${root_uuid}    /        ext4    rw,relatime    0 1
+UUID=$(blkid -s UUID -o value ${DISK}1)    /boot    vfat    rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro    0 2
+EOF
 
-    echo "=== Configuring locale ==="
-    echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
-    echo "LANG=en_US.UTF-8" >> /etc/locale.conf
-    locale-gen
+echo "=== Enabling services ==="
+systemctl enable systemd-networkd
+systemctl enable systemd-resolved
+systemctl enable systemd-timesyncd
+systemctl enable sshd
 
-    echo "=== Configuring hostname and timezone ==="
-    echo "$hostname" > /etc/hostname
-    cat << EOF > /etc/hosts
+echo "=== Configuring locale ==="
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+echo "LANG=en_US.UTF-8" >> /etc/locale.conf
+locale-gen
+
+echo "=== Configuring hostname and timezone ==="
+echo "$HOSTNAME" > /etc/hostname
+cat << EOF > /etc/hosts
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   ${hostname}.localdomain ${hostname}
+127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
-    
-    ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
-    hwclock --systohc || true
 
-    echo "=== Creating user: $username ==="
-    useradd -m -G wheel -s /bin/bash "$username"
-    echo "${username}:${password}" | chpasswd
-    
-    echo "=== Configuring sudo ==="
-    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-    
-    echo "=== Configuring SSH ==="
-    mkdir -p /home/${username}/.ssh
-    chmod 700 /home/${username}/.ssh
-    curl -fSsL "$AUTHORIZED_KEYS" > /home/${username}/.ssh/authorized_keys
-    chmod 600 /home/${username}/.ssh/authorized_keys
-    chown -R ${username}:${username} /home/${username}/.ssh
-    
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-    
-    echo "=== Locking root account ==="
-    passwd -l root
-    
-    echo "=== User configuration saved ==="
-    cat > /home/${username}/login_info.txt << EOF
-Hostname: ${hostname}
-Username: ${username}
-Password: ${password}
+ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
+hwclock --systohc || true
+
+echo "=== Creating user: $USERNAME ==="
+useradd -m -G wheel -s /bin/bash "$USERNAME"
+echo "${USERNAME}:${PASSWORD}" | chpasswd
+
+echo "=== Configuring sudo ==="
+sed -i 's/^# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/%wheel ALL=(ALL:ALL) NOPASSWD: ALL/' /etc/sudoers
+sed -i 's/^%wheel ALL=(ALL:ALL) ALL/# %wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+echo "=== Configuring SSH ==="
+mkdir -p /home/${USERNAME}/.ssh
+chmod 700 /home/${USERNAME}/.ssh
+curl -fSsL "$AUTHORIZED_KEYS" > /home/${USERNAME}/.ssh/authorized_keys
+chmod 600 /home/${USERNAME}/.ssh/authorized_keys
+chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.ssh
+
+sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+echo "=== Locking root account ==="
+passwd -l root
+
+echo "=== User configuration saved ==="
+cat > /home/${USERNAME}/login_info.txt << EOF
+Hostname: ${HOSTNAME}
+Username: ${USERNAME}
+Password: ${PASSWORD}
 
 SSH Login:
-  ssh ${username}@<server-ip>
+  ssh ${USERNAME}@<server-ip>
+  (Uses SSH key only, password disabled for SSH)
 
-To become root:
-  sudo -i
+Sudo: No password required (NOPASSWD enabled)
+
+Password can be used for:
+  - xrdp (Remote Desktop)
+  - Console/TTY login
+  - su command
 
 Note: Root login is disabled for security.
 EOF
-    chmod 600 /home/${username}/login_info.txt
-    chown ${username}:${username} /home/${username}/login_info.txt
+chmod 600 /home/${USERNAME}/login_info.txt
+chown ${USERNAME}:${USERNAME} /home/${USERNAME}/login_info.txt
 
-    echo "=== Building initramfs ==="
-    touch /etc/vconsole.conf
-    mkinitcpio -P
+echo "=== Building initramfs ==="
+touch /etc/vconsole.conf
+mkinitcpio -P
+
+echo "Installation complete!"
+INSTALLSCRIPT
+
+    chmod +x /mnt/root/install.sh
     
-    echo "Finalization complete!"
-}
-
-case "$ACTION" in
-    do_pacstrap)
-        do_pacstrap
-        ;;
-    finalize)
-        finalize "$USERNAME" "$PASSWORD" "$TZ"
-        ;;
-esac
-INNERSCRIPT
-
-    chmod +x /bootstrap/root/bootstrap.sh
+    echo "=== Running installation in chroot ==="
+    chroot /mnt /root/install.sh "$ACTION" "$USERNAME" "$PASSWORD"
     
-    echo "=== Running pacstrap ==="
-    cd /
-    /bootstrap/bin/arch-chroot /bootstrap /root/bootstrap.sh 'do_pacstrap'
-    
-    echo "=== Finalizing installation ==="
-    /bootstrap/bin/arch-chroot /bootstrap/mnt/ /root/bootstrap.sh 'finalize' "$ACTION" "$USERNAME" "$PASSWORD"
-
     echo "=== Configuring network ==="
     if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+        cat << EOF > /mnt/etc/systemd/network/20-ovh.network
 [Match]
 Name=en*
 
@@ -354,7 +343,7 @@ DNS=2001:4860:4860::8888
 EOF
     else
         echo "IPv6 not configured, using IPv4 only"
-        cat << EOF > /bootstrap/mnt/etc/systemd/network/20-ovh.network
+        cat << EOF > /mnt/etc/systemd/network/20-ovh.network
 [Match]
 Name=en*
 
@@ -366,11 +355,16 @@ EOF
     fi
 
     echo "=== Cleaning up ==="
-    rm /bootstrap/root/bootstrap.sh
+    rm /mnt/root/install.sh
     sync
-    umount /bootstrap/mnt/boot
-    umount /bootstrap/mnt
-    umount /bootstrap
+    
+    umount /mnt/tmp
+    umount /mnt/sys
+    umount /mnt/proc
+    umount /mnt/dev/pts
+    umount /mnt/dev
+    umount /mnt/boot
+    umount /mnt
     
     echo ""
     echo "======================================"
@@ -385,8 +379,10 @@ EOF
     echo ""
     echo "Install log saved to: /tmp/install.log"
     echo ""
-    echo "IMPORTANT: Root login is DISABLED"
-    echo "Login with: ssh $USERNAME@$ipv4_address"
+    echo "SSH: Key-based authentication only"
+    echo "Login: ssh $USERNAME@$ipv4_address"
+    echo "Sudo: NOPASSWD (no password required)"
+    echo "Password: Available for xrdp/console login"
     echo ""
     echo "Now reboot the VPS from the OVH control panel"
     echo "======================================"
