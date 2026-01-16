@@ -183,6 +183,9 @@ EOF
     sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
     
     echo "=== Preparing chroot environment ==="
+    # Copy DNS configuration from host
+    cp /etc/resolv.conf /mnt/etc/resolv.conf
+    
     mount --bind /dev /mnt/dev
     mount --bind /dev/pts /mnt/dev/pts
     mount -t proc /proc /mnt/proc
@@ -214,13 +217,15 @@ bootctl --path=/boot install
 
 # Get root partition UUID
 root_uuid=$(blkid -s UUID -o value ${DISK}2)
+efi_uuid=$(blkid -s UUID -o value ${DISK}1)
 
 echo "Root UUID: $root_uuid"
+echo "EFI UUID: $efi_uuid"
 
 # Create boot entry directory
 mkdir -p /boot/loader/entries
 
-# Create boot entry
+# Create boot entry with root UUID in kernel parameters
 cat > /boot/loader/entries/arch.conf << EOF
 title   Arch Linux
 linux   /vmlinuz-linux
@@ -237,13 +242,6 @@ EOF
 
 echo "=== Updating systemd-boot ==="
 bootctl update
-
-echo "=== Generating fstab ==="
-cat > /etc/fstab << EOF
-# /etc/fstab: static file system information
-UUID=${root_uuid}    /        ext4    rw,relatime    0 1
-UUID=$(blkid -s UUID -o value ${DISK}1)    /boot    vfat    rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro    0 2
-EOF
 
 echo "=== Enabling services ==="
 systemctl enable systemd-networkd
@@ -310,6 +308,7 @@ Password can be used for:
   - su command
 
 Note: Root login is disabled for security.
+No fstab - systemd handles mounting automatically.
 EOF
 chmod 600 /home/${USERNAME}/login_info.txt
 chown ${USERNAME}:${USERNAME} /home/${USERNAME}/login_info.txt
@@ -383,6 +382,7 @@ EOF
     echo "Login: ssh $USERNAME@$ipv4_address"
     echo "Sudo: NOPASSWD (no password required)"
     echo "Password: Available for xrdp/console login"
+    echo "No fstab - systemd handles mounting"
     echo ""
     echo "Now reboot the VPS from the OVH control panel"
     echo "======================================"
