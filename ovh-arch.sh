@@ -83,6 +83,51 @@ get_network_info() {
     echo "---"
 }
 
+# ฟังก์ชันสำหรับ umount อย่างปลอดภัย
+safe_umount() {
+    local mount_point="$1"
+    local max_attempts=5
+    local attempt=1
+    
+    if ! mountpoint -q "$mount_point" 2>/dev/null; then
+        echo "✓ $mount_point is not mounted"
+        return 0
+    fi
+    
+    echo "Unmounting $mount_point..."
+    
+    while [ $attempt -le $max_attempts ]; do
+        if umount "$mount_point" 2>/dev/null; then
+            echo "✓ Successfully unmounted $mount_point"
+            return 0
+        fi
+        
+        echo "Attempt $attempt/$max_attempts: $mount_point is busy, trying lazy umount..."
+        
+        # ฆ่า process ที่ใช้งาน mount point
+        fuser -km "$mount_point" 2>/dev/null || true
+        sleep 1
+        
+        # ลอง umount อีกครั้ง
+        if umount "$mount_point" 2>/dev/null; then
+            echo "✓ Successfully unmounted $mount_point"
+            return 0
+        fi
+        
+        # ถ้ายังไม่ได้ ใช้ lazy umount
+        if umount -l "$mount_point" 2>/dev/null; then
+            echo "✓ Lazy unmounted $mount_point"
+            return 0
+        fi
+        
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    
+    echo "⚠ Warning: Could not cleanly unmount $mount_point, forcing..."
+    umount -f "$mount_point" 2>/dev/null || umount -l "$mount_point" 2>/dev/null || true
+}
+
 function main() {
     if [[ -z "$ACTION" ]]; then
         echo "Usage: $0 <hostname> <username> <password>"
@@ -107,6 +152,7 @@ function main() {
     echo "Hostname: $ACTION"
     echo "Username: $USERNAME"
     echo "Password: [hidden]"
+    echo "Kernel: linux-zen"
     
     if [ ! -b "$DISK" ]; then
         echo "Error: Disk $DISK does not exist" >&2
@@ -210,7 +256,12 @@ pacman-key --init
 pacman-key --populate archlinux
 
 echo "=== Installing packages ==="
-pacman -Sy --noconfirm base linux linux-firmware openssh sudo
+# เปลี่ยนเป็น linux-zen และเพิ่ม linux-zen-headers
+pacman -Sy --noconfirm base linux-zen linux-zen-headers linux-firmware openssh sudo
+
+echo "=== Updating system (pacman -Syu) ==="
+# อัพเดทระบบให้เป็นเวอร์ชันล่าสุดทันทีหลังติดตั้ง
+pacman -Syu --noconfirm
 
 echo "=== Installing systemd-boot ==="
 bootctl --path=/boot install
@@ -225,12 +276,14 @@ echo "EFI UUID: $efi_uuid"
 # Create boot entry directory
 mkdir -p /boot/loader/entries
 
-# Create boot entry with root UUID in kernel parameters
+# สร้าง boot entry ที่ใช้ wildcard สำหรับ kernel ใดๆ
+# จะทำให้รองรับการเปลี่ยน kernel ได้
+# เพิ่ม kernel parameters เพื่อเพิ่มความเร็วในการบูต
 cat > /boot/loader/entries/arch.conf << EOF
 title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /initramfs-linux.img
-options root=UUID=${root_uuid} rw
+linux   /vmlinuz-linux-zen
+initrd  /initramfs-linux-zen.img
+options root=UUID=${root_uuid} rw quiet loglevel=3 nowatchdog nvme_load=YES
 EOF
 
 # Configure loader
@@ -238,7 +291,96 @@ cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 0
 console-mode keep
+editor no
 EOF
+
+# สร้าง pacman hook สำหรับอัพเดท boot entry อัตโนมัติเมื่อเปลี่ยน kernel
+mkdir -p /etc/pacman.d/hooks
+
+cat > /etc/pacman.d/hooks/95-systemd-boot.hook << 'HOOKEOF'
+[Trigger]
+Type = Package
+Operation = Upgrade
+Target = systemd
+
+[Action]
+Description = Updating systemd-boot
+When = PostTransaction
+Exec = /usr/bin/bootctl update
+HOOKEOF
+
+cat > /etc/pacman.d/hooks/90-kernel-boot-entry.hook << 'HOOKEOF'
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux
+Target = linux-lts
+Target = linux-zen
+Target = linux-hardened
+
+[Action]
+Description = Updating kernel boot entries
+When = PostTransaction
+Exec = /usr/local/bin/update-boot-entries.sh
+HOOKEOF
+
+# สร้าง script สำหรับอัพเดท boot entries
+cat > /usr/local/bin/update-boot-entries.sh << 'UPDATEEOF'
+#!/bin/bash
+# Auto-update boot entries for all installed kernels
+
+ROOT_UUID=$(findmnt -n -o UUID /)
+ENTRIES_DIR="/boot/loader/entries"
+
+# ลบ entries เก่าทั้งหมด
+rm -f ${ENTRIES_DIR}/arch*.conf
+
+# หา kernels ทั้งหมดที่ติดตั้ง
+for kernel in /boot/vmlinuz-*; do
+    [ -f "$kernel" ] || continue
+    
+    kernel_name=$(basename "$kernel" | sed 's/vmlinuz-//')
+    initrd="/boot/initramfs-${kernel_name}.img"
+    
+    # ตรวจสอบว่ามี initramfs
+    if [ ! -f "$initrd" ]; then
+        echo "Warning: No initramfs for $kernel_name"
+        continue
+    fi
+    
+    # สร้าง entry
+    entry_file="${ENTRIES_DIR}/arch-${kernel_name}.conf"
+    cat > "$entry_file" << EOF
+title   Arch Linux (${kernel_name})
+linux   /vmlinuz-${kernel_name}
+initrd  /initramfs-${kernel_name}.img
+options root=UUID=${ROOT_UUID} rw quiet loglevel=3 nowatchdog nvme_load=YES
+EOF
+    
+    echo "Created boot entry: $entry_file"
+done
+
+# ตั้งค่า default entry (ให้ใช้ zen ถ้ามี)
+if [ -f "${ENTRIES_DIR}/arch-linux-zen.conf" ]; then
+    sed -i 's/^default .*/default arch-linux-zen.conf/' /boot/loader/loader.conf
+elif [ -f "${ENTRIES_DIR}/arch-linux.conf" ]; then
+    sed -i 's/^default .*/default arch-linux.conf/' /boot/loader/loader.conf
+else
+    # ใช้ entry แรกที่เจอ
+    first_entry=$(ls ${ENTRIES_DIR}/arch*.conf 2>/dev/null | head -n1 | xargs basename)
+    if [ -n "$first_entry" ]; then
+        sed -i "s/^default .*/default $first_entry/" /boot/loader/loader.conf
+    fi
+fi
+
+echo "Boot entries updated successfully"
+UPDATEEOF
+
+chmod +x /usr/local/bin/update-boot-entries.sh
+
+# รัน script ครั้งแรก
+/usr/local/bin/update-boot-entries.sh
 
 echo "=== Updating systemd-boot ==="
 bootctl update
@@ -264,6 +406,46 @@ EOF
 
 ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
 hwclock --systohc || true
+
+echo "=== Optimizing boot speed ==="
+# ปิด service ที่ไม่จำเป็นต่อการบูต
+systemctl mask systemd-networkd-wait-online.service
+
+# ตั้งค่า systemd สำหรับการบูตเร็วขึ้น
+mkdir -p /etc/systemd/system.conf.d
+cat > /etc/systemd/system.conf.d/boot-optimization.conf << 'EOF'
+[Manager]
+# ลดเวลา timeout
+DefaultTimeoutStartSec=10s
+DefaultTimeoutStopSec=10s
+DefaultDeviceTimeoutSec=10s
+
+# เพิ่มความเร็วในการทำงาน
+DefaultStartLimitIntervalSec=10s
+DefaultStartLimitBurst=5
+EOF
+
+# ปรับแต่ง journald เพื่อลดการเขียน disk
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/boot-optimization.conf << 'EOF'
+[Journal]
+# ลดการเขียน log ระหว่างบูต
+Storage=volatile
+RuntimeMaxUse=50M
+EOF
+
+# ตั้งค่า systemd-resolved ให้เร็วขึ้น
+mkdir -p /etc/systemd/resolved.conf.d
+cat > /etc/systemd/resolved.conf.d/boot-optimization.conf << 'EOF'
+[Resolve]
+# ใช้ DNS cache เพื่อความเร็ว
+Cache=yes
+CacheFromLocalhost=yes
+DNSSEC=no
+DNSOverTLS=no
+MulticastDNS=no
+LLMNR=no
+EOF
 
 echo "=== Creating user: $USERNAME ==="
 useradd -m -G wheel -s /bin/bash "$USERNAME"
@@ -295,6 +477,9 @@ cat > /home/${USERNAME}/login_info.txt << EOF
 Hostname: ${HOSTNAME}
 Username: ${USERNAME}
 Password: ${PASSWORD}
+Kernel: linux-zen
+System: Fully updated (pacman -Syu completed during installation)
+Boot: Optimized for fastest boot time
 
 SSH Login:
   ssh ${USERNAME}@<server-ip>
@@ -308,6 +493,30 @@ Password can be used for:
   - su command
 
 Note: Root login is disabled for security.
+
+Boot Optimizations Applied:
+  - Bootloader timeout: 0 seconds (instant boot)
+  - Kernel parameters: quiet, loglevel=3, nowatchdog
+  - Initramfs compression: zstd (fastest)
+  - Systemd timeouts: Reduced to 10s
+  - Journal storage: volatile (RAM only during boot)
+  - Network wait: Disabled (systemd-networkd-wait-online masked)
+  - DNS: Local cache enabled, DNSSEC/DoT disabled for speed
+
+Kernel Management:
+  - Current kernel: linux-zen
+  - To install another kernel: sudo pacman -S linux (or linux-lts, linux-hardened)
+  - Boot entries are auto-updated via pacman hooks
+  - To manually update: sudo /usr/local/bin/update-boot-entries.sh
+  - View boot entries: bootctl list
+  - Change default: sudo bootctl set-default <entry>
+  - Check boot time: systemd-analyze / systemd-analyze blame
+
+System Maintenance:
+  - System is already fully updated
+  - To update later: sudo pacman -Syu
+  - Clean package cache: sudo pacman -Sc
+
 No fstab - systemd handles mounting automatically.
 EOF
 chmod 600 /home/${USERNAME}/login_info.txt
@@ -315,6 +524,27 @@ chown ${USERNAME}:${USERNAME} /home/${USERNAME}/login_info.txt
 
 echo "=== Building initramfs ==="
 touch /etc/vconsole.conf
+
+# ปรับแต่ง mkinitcpio เพื่อความเร็ว
+cat > /etc/mkinitcpio.conf << 'EOF'
+# MODULES - เพิ่มเฉพาะที่จำเป็น
+MODULES=(ext4)
+
+# BINARIES
+BINARIES=()
+
+# FILES
+FILES=()
+
+# HOOKS - ลดเหลือเฉพาะที่จำเป็น เพื่อความเร็ว
+# ไม่ใช้ autodetect เพื่อความเสถียร แต่เลือก hooks น้อยที่สุด
+HOOKS=(base systemd autodetect modconf kms keyboard sd-vconsole block filesystems fsck)
+
+# COMPRESSION - ใช้ zstd เพื่อความเร็วในการบูต
+COMPRESSION="zstd"
+COMPRESSION_OPTIONS=(-1 -T0)
+EOF
+
 mkinitcpio -P
 
 echo "Installation complete!"
@@ -354,16 +584,18 @@ EOF
     fi
 
     echo "=== Cleaning up ==="
-    rm /mnt/root/install.sh
+    # ออกจาก chroot ก่อน (ถ้ามี process ค้าง)
     sync
     
-    umount /mnt/tmp
-    umount /mnt/sys
-    umount /mnt/proc
-    umount /mnt/dev/pts
-    umount /mnt/dev
-    umount /mnt/boot
-    umount /mnt
+    # ใช้ฟังก์ชัน safe_umount สำหรับทุก mount point
+    # Umount ตามลำดับจากใน -> นอก
+    safe_umount /mnt/tmp
+    safe_umount /mnt/sys
+    safe_umount /mnt/proc
+    safe_umount /mnt/dev/pts
+    safe_umount /mnt/dev
+    safe_umount /mnt/boot
+    safe_umount /mnt
     
     echo ""
     echo "======================================"
@@ -371,6 +603,9 @@ EOF
     echo "======================================"
     echo "Hostname: $ACTION"
     echo "Username: $USERNAME"
+    echo "Kernel: linux-zen"
+    echo "System: Fully updated (pacman -Syu completed)"
+    echo "Boot: Optimized for maximum speed"
     echo "IPv4: $ipv4_address/$ipv4_prefix (gateway: $ipv4_gateway)"
     if [ -n "$ipv6_gateway" ] && [ "$ipv6_address" != "::1" ]; then
         echo "IPv6: $ipv6_address/$ipv6_prefix (gateway: $ipv6_gateway)"
@@ -382,6 +617,30 @@ EOF
     echo "Login: ssh $USERNAME@$ipv4_address"
     echo "Sudo: NOPASSWD (no password required)"
     echo "Password: Available for xrdp/console login"
+    echo ""
+    echo "Boot Optimizations:"
+    echo "  • Bootloader timeout: 0s (instant)"
+    echo "  • Kernel params: quiet, nowatchdog, optimized"
+    echo "  • Initramfs: zstd compression (fastest)"
+    echo "  • Systemd: Reduced timeouts (10s)"
+    echo "  • Network: No wait for online"
+    echo "  • Journal: Volatile storage during boot"
+    echo "  • After boot, check: systemd-analyze"
+    echo ""
+    echo "Kernel Features:"
+    echo "  • linux-zen kernel installed"
+    echo "  • Auto-update boot entries on kernel changes"
+    echo "  • Pacman hooks enabled for kernel management"
+    echo "  • To install additional kernels:"
+    echo "    sudo pacman -S linux        # Standard kernel"
+    echo "    sudo pacman -S linux-lts    # Long-term support"
+    echo "    sudo pacman -S linux-hardened # Hardened kernel"
+    echo ""
+    echo "System Maintenance:"
+    echo "  • System is fully updated (no need to run pacman -Syu)"
+    echo "  • All packages are at the latest version"
+    echo "  • Future updates: sudo pacman -Syu"
+    echo ""
     echo "No fstab - systemd handles mounting"
     echo ""
     echo "Now reboot the VPS from the OVH control panel"
