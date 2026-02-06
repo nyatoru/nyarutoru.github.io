@@ -168,7 +168,7 @@ function main() {
     cd /tmp
     
     echo "=== Downloading Arch Linux bootstrap ==="
-    curl -fSsL https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst > /tmp/archlinux.tar.zst
+    curl -# -fSL --progress-bar https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst -o /tmp/archlinux.tar.zst
     
     if [ ! -s /tmp/archlinux.tar.zst ]; then
         echo "Error: Failed to download Arch Linux bootstrap" >&2
@@ -458,7 +458,7 @@ sed -i 's/^%wheel ALL=(ALL:ALL) ALL/# %wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 echo "=== Configuring SSH ==="
 mkdir -p /home/${USERNAME}/.ssh
 chmod 700 /home/${USERNAME}/.ssh
-curl -fSsL "$AUTHORIZED_KEYS" > /home/${USERNAME}/.ssh/authorized_keys
+curl -# -fSL --progress-bar "$AUTHORIZED_KEYS" -o /home/${USERNAME}/.ssh/authorized_keys
 chmod 600 /home/${USERNAME}/.ssh/authorized_keys
 chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.ssh
 
@@ -648,3 +648,4 @@ EOF
 }
 
 main
+exit 0
