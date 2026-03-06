@@ -25,7 +25,7 @@ ipv6_gateway=""
 
 get_network_info() {
     echo "=== Detecting network configuration ==="
-    
+
     local iface=$(ip -4 route | grep default | sed -e "s/^.*dev \([^ ]*\) .*$/\1/" | head -n1)
     if [ -z "$iface" ]; then
         echo "Could not determine default IPv4 interface." >&2
@@ -52,13 +52,13 @@ get_network_info() {
 
     echo "Detecting IPv6 configuration..."
     ipv6_address=$(ip -6 route 2>/dev/null | grep -v "^fe80" | grep -v "^ff00" | head -n1 | cut -f1 -d" " || echo "")
-    
+
     if [ -z "$ipv6_address" ] || [ "$ipv6_address" = "::1" ]; then
         echo "Warning: No IPv6 address found"
         ipv6_gateway=""
     else
         echo "IPv6 Address found: $ipv6_address"
-        
+
         if [ -f /etc/network/interfaces.d/50-cloud-init ]; then
             local ipv6_gateway_info=$(grep -i "gateway" /etc/network/interfaces.d/50-cloud-init 2>/dev/null | grep -v "^#" | grep ":" | head -n1 | awk '{print $NF}' || echo "")
             if [ -n "$ipv6_gateway_info" ]; then
@@ -78,7 +78,7 @@ get_network_info() {
             fi
         fi
     fi
-    
+
     echo "Network detection complete"
     echo "---"
 }
@@ -88,42 +88,39 @@ safe_umount() {
     local mount_point="$1"
     local max_attempts=5
     local attempt=1
-    
+
     if ! mountpoint -q "$mount_point" 2>/dev/null; then
         echo "✓ $mount_point is not mounted"
         return 0
     fi
-    
+
     echo "Unmounting $mount_point..."
-    
+
     while [ $attempt -le $max_attempts ]; do
         if umount "$mount_point" 2>/dev/null; then
             echo "✓ Successfully unmounted $mount_point"
             return 0
         fi
-        
+
         echo "Attempt $attempt/$max_attempts: $mount_point is busy, trying lazy umount..."
-        
-        # ฆ่า process ที่ใช้งาน mount point
+
         fuser -km "$mount_point" 2>/dev/null || true
         sleep 1
-        
-        # ลอง umount อีกครั้ง
+
         if umount "$mount_point" 2>/dev/null; then
             echo "✓ Successfully unmounted $mount_point"
             return 0
         fi
-        
-        # ถ้ายังไม่ได้ ใช้ lazy umount
+
         if umount -l "$mount_point" 2>/dev/null; then
             echo "✓ Lazy unmounted $mount_point"
             return 0
         fi
-        
+
         attempt=$((attempt + 1))
         sleep 2
     done
-    
+
     echo "⚠ Warning: Could not cleanly unmount $mount_point, forcing..."
     umount -f "$mount_point" 2>/dev/null || umount -l "$mount_point" 2>/dev/null || true
 }
@@ -134,42 +131,42 @@ function main() {
         echo "Example: $0 myserver john MySecurePass123"
         exit 1
     fi
-    
+
     if [[ -z "$USERNAME" ]]; then
         echo "Error: Username is required"
         echo "Usage: $0 <hostname> <username> <password>"
         exit 1
     fi
-    
+
     if [[ -z "$PASSWORD" ]]; then
         echo "Error: Password is required"
         echo "Usage: $0 <hostname> <username> <password>"
         exit 1
     fi
-    
+
     echo "=== Starting Arch Linux installation ==="
     echo "Target disk: $DISK"
     echo "Hostname: $ACTION"
     echo "Username: $USERNAME"
     echo "Password: [hidden]"
     echo "Kernel: linux-zen"
-    
+
     if [ ! -b "$DISK" ]; then
         echo "Error: Disk $DISK does not exist" >&2
         exit 1
     fi
-    
+
     if mount | grep -q "$DISK"; then
         echo "Warning: $DISK has mounted partitions. Unmounting..."
         umount ${DISK}* 2>/dev/null || true
     fi
-    
+
     get_network_info
     cd /tmp
-    
+
     echo "=== Downloading Arch Linux bootstrap ==="
     curl -# -fSL --progress-bar https://mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst -o /tmp/archlinux.tar.zst
-    
+
     if [ ! -s /tmp/archlinux.tar.zst ]; then
         echo "Error: Failed to download Arch Linux bootstrap" >&2
         exit 1
@@ -184,12 +181,12 @@ function main() {
     sgdisk --zap-all "$DISK"
     sgdisk -n 1:2048:+512M -c 1:"EFI System Partition" -t 1:EF00 "$DISK"
     sgdisk -n 2:0:0 --typecode=2:8300 --change-name=2:"Linux Root" "$DISK"
-    
+
     echo "=== Reloading partition table ==="
     partprobe "$DISK" 2>/dev/null || true
     blockdev --rereadpt "$DISK" 2>/dev/null || true
     sleep 3
-    
+
     for i in {1..10}; do
         if [ -b "${DISK}1" ] && [ -b "${DISK}2" ]; then
             echo "✓ Partitions ready"
@@ -198,13 +195,13 @@ function main() {
         echo "Waiting for partitions... ($i/10)"
         sleep 1
     done
-    
+
     if [ ! -b "${DISK}1" ] || [ ! -b "${DISK}2" ]; then
         echo "Error: Partition devices not found" >&2
         ls -l /dev/sd* >&2
         exit 1
     fi
-    
+
     echo "=== Formatting partitions ==="
     mkfs.fat -F32 "${DISK}1"
     mkfs.ext4 -F "${DISK}2"
@@ -213,11 +210,10 @@ function main() {
     echo "=== Setting up root filesystem ==="
     mkdir -p /mnt
     mount "${DISK}2" /mnt
-    
-    # Mount EFI partition
+
     mkdir -p /mnt/boot
     mount "${DISK}1" /mnt/boot
-    
+
     echo "=== Extracting base system ==="
     cd /mnt
     tar xf /tmp/archlinux.tar.zst --strip-components=1 2>&1 | grep -v "Ignoring unknown extended header keyword" || true
@@ -227,17 +223,16 @@ function main() {
 Server = https://mirror.pkgbuild.com/$repo/os/$arch
 EOF
     sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
-    
+
     echo "=== Preparing chroot environment ==="
-    # Copy DNS configuration from host
     cp /etc/resolv.conf /mnt/etc/resolv.conf
-    
+
     mount --bind /dev /mnt/dev
     mount --bind /dev/pts /mnt/dev/pts
     mount -t proc /proc /mnt/proc
     mount -t sysfs /sys /mnt/sys
     mount -t tmpfs /tmp /mnt/tmp
-    
+
     # Create installation script
     cat > /mnt/root/install.sh << 'INSTALLSCRIPT'
 #!/bin/bash
@@ -256,29 +251,22 @@ pacman-key --init
 pacman-key --populate archlinux
 
 echo "=== Installing packages ==="
-# เปลี่ยนเป็น linux-zen และเพิ่ม linux-zen-headers
 pacman -Sy --noconfirm base linux-zen linux-zen-headers linux-firmware openssh sudo
 
 echo "=== Updating system (pacman -Syu) ==="
-# อัพเดทระบบให้เป็นเวอร์ชันล่าสุดทันทีหลังติดตั้ง
 pacman -Syu --noconfirm
 
 echo "=== Installing systemd-boot ==="
 bootctl --path=/boot install
 
-# Get root partition UUID
 root_uuid=$(blkid -s UUID -o value ${DISK}2)
 efi_uuid=$(blkid -s UUID -o value ${DISK}1)
 
 echo "Root UUID: $root_uuid"
 echo "EFI UUID: $efi_uuid"
 
-# Create boot entry directory
 mkdir -p /boot/loader/entries
 
-# สร้าง boot entry ที่ใช้ wildcard สำหรับ kernel ใดๆ
-# จะทำให้รองรับการเปลี่ยน kernel ได้
-# เพิ่ม kernel parameters เพื่อเพิ่มความเร็วในการบูต
 cat > /boot/loader/entries/arch.conf << EOF
 title   Arch Linux
 linux   /vmlinuz-linux-zen
@@ -286,7 +274,6 @@ initrd  /initramfs-linux-zen.img
 options root=UUID=${root_uuid} rw quiet loglevel=3 nowatchdog nvme_load=YES
 EOF
 
-# Configure loader
 cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 0
@@ -294,7 +281,10 @@ console-mode keep
 editor no
 EOF
 
-# สร้าง pacman hook สำหรับอัพเดท boot entry อัตโนมัติเมื่อเปลี่ยน kernel
+# =====================================================
+# FIX: Pacman hooks — trigger on PATH (after mkinitcpio)
+# instead of package name, to ensure initramfs is ready
+# =====================================================
 mkdir -p /etc/pacman.d/hooks
 
 cat > /etc/pacman.d/hooks/95-systemd-boot.hook << 'HOOKEOF'
@@ -309,26 +299,43 @@ When = PostTransaction
 Exec = /usr/bin/bootctl update
 HOOKEOF
 
+# FIX: ใช้ Path trigger แทน Package trigger
+# เพื่อให้ทำงานหลัง mkinitcpio สร้าง initramfs เสร็จแล้วจริงๆ
 cat > /etc/pacman.d/hooks/90-kernel-boot-entry.hook << 'HOOKEOF'
 [Trigger]
-Type = Package
+Type = Path
 Operation = Install
 Operation = Upgrade
-Target = linux
-Target = linux-lts
-Target = linux-zen
-Target = linux-hardened
+Path = usr/lib/modules/*/vmlinuz
+Path = boot/initramfs-*.img
 
 [Action]
-Description = Updating kernel boot entries
+Description = Updating kernel boot entries after kernel/initramfs change
 When = PostTransaction
 Exec = /usr/local/bin/update-boot-entries.sh
+NeedsTargets
 HOOKEOF
 
 # สร้าง script สำหรับอัพเดท boot entries
 cat > /usr/local/bin/update-boot-entries.sh << 'UPDATEEOF'
 #!/bin/bash
 # Auto-update boot entries for all installed kernels
+
+# =====================================================
+# FIX: ตรวจสอบว่า /boot (EFI) mount อยู่ก่อนทุกครั้ง
+# ถ้าไม่ mount → kernel/initramfs จะถูกเขียนลง / แทน
+# ทำให้ EFI หา vmlinuz ไม่เจอและค้างที่ boot menu
+# =====================================================
+if ! mountpoint -q /boot; then
+    echo "WARNING: /boot is not mounted! Attempting to mount..."
+    if mount /boot; then
+        echo "✓ /boot mounted successfully"
+    else
+        echo "ERROR: Failed to mount /boot. Aborting boot entry update."
+        echo "Please run: mount /boot && sudo /usr/local/bin/update-boot-entries.sh"
+        exit 1
+    fi
+fi
 
 ROOT_UUID=$(findmnt -n -o UUID /)
 ENTRIES_DIR="/boot/loader/entries"
@@ -339,17 +346,15 @@ rm -f ${ENTRIES_DIR}/arch*.conf
 # หา kernels ทั้งหมดที่ติดตั้ง
 for kernel in /boot/vmlinuz-*; do
     [ -f "$kernel" ] || continue
-    
+
     kernel_name=$(basename "$kernel" | sed 's/vmlinuz-//')
     initrd="/boot/initramfs-${kernel_name}.img"
-    
-    # ตรวจสอบว่ามี initramfs
+
     if [ ! -f "$initrd" ]; then
-        echo "Warning: No initramfs for $kernel_name"
+        echo "Warning: No initramfs for $kernel_name, skipping..."
         continue
     fi
-    
-    # สร้าง entry
+
     entry_file="${ENTRIES_DIR}/arch-${kernel_name}.conf"
     cat > "$entry_file" << EOF
 title   Arch Linux (${kernel_name})
@@ -357,29 +362,28 @@ linux   /vmlinuz-${kernel_name}
 initrd  /initramfs-${kernel_name}.img
 options root=UUID=${ROOT_UUID} rw quiet loglevel=3 nowatchdog nvme_load=YES
 EOF
-    
-    echo "Created boot entry: $entry_file"
+
+    echo "✓ Created boot entry: $entry_file"
 done
 
-# ตั้งค่า default entry (ให้ใช้ zen ถ้ามี)
+# ตั้งค่า default entry
 if [ -f "${ENTRIES_DIR}/arch-linux-zen.conf" ]; then
     sed -i 's/^default .*/default arch-linux-zen.conf/' /boot/loader/loader.conf
 elif [ -f "${ENTRIES_DIR}/arch-linux.conf" ]; then
     sed -i 's/^default .*/default arch-linux.conf/' /boot/loader/loader.conf
 else
-    # ใช้ entry แรกที่เจอ
     first_entry=$(ls ${ENTRIES_DIR}/arch*.conf 2>/dev/null | head -n1 | xargs basename)
     if [ -n "$first_entry" ]; then
         sed -i "s/^default .*/default $first_entry/" /boot/loader/loader.conf
     fi
 fi
 
-echo "Boot entries updated successfully"
+echo "✓ Boot entries updated successfully"
+bootctl list
 UPDATEEOF
 
 chmod +x /usr/local/bin/update-boot-entries.sh
 
-# รัน script ครั้งแรก
 /usr/local/bin/update-boot-entries.sh
 
 echo "=== Updating systemd-boot ==="
@@ -408,37 +412,28 @@ ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
 hwclock --systohc || true
 
 echo "=== Optimizing boot speed ==="
-# ปิด service ที่ไม่จำเป็นต่อการบูต
 systemctl mask systemd-networkd-wait-online.service
 
-# ตั้งค่า systemd สำหรับการบูตเร็วขึ้น
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/boot-optimization.conf << 'EOF'
 [Manager]
-# ลดเวลา timeout
 DefaultTimeoutStartSec=10s
 DefaultTimeoutStopSec=10s
 DefaultDeviceTimeoutSec=10s
-
-# เพิ่มความเร็วในการทำงาน
 DefaultStartLimitIntervalSec=10s
 DefaultStartLimitBurst=5
 EOF
 
-# ปรับแต่ง journald เพื่อลดการเขียน disk
 mkdir -p /etc/systemd/journald.conf.d
 cat > /etc/systemd/journald.conf.d/boot-optimization.conf << 'EOF'
 [Journal]
-# ลดการเขียน log ระหว่างบูต
 Storage=volatile
 RuntimeMaxUse=50M
 EOF
 
-# ตั้งค่า systemd-resolved ให้เร็วขึ้น
 mkdir -p /etc/systemd/resolved.conf.d
 cat > /etc/systemd/resolved.conf.d/boot-optimization.conf << 'EOF'
 [Resolve]
-# ใช้ DNS cache เพื่อความเร็ว
 Cache=yes
 CacheFromLocalhost=yes
 DNSSEC=no
@@ -472,6 +467,25 @@ sed -i 's/PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_con
 echo "=== Locking root account ==="
 passwd -l root
 
+# =====================================================
+# FIX: สร้าง /etc/fstab เพื่อให้ /boot mount อัตโนมัติ
+# เป็นสาเหตุหลักที่ทำให้ค้างหน้า EFI หลัง kernel update
+# เพราะถ้าไม่มี fstab → /boot จะไม่ถูก mount เมื่อ reboot
+# → pacman เขียน vmlinuz/initramfs ลง root แทน /boot จริงๆ
+# =====================================================
+echo "=== Creating /etc/fstab ==="
+root_uuid=$(blkid -s UUID -o value ${DISK}2)
+efi_uuid=$(blkid -s UUID -o value ${DISK}1)
+
+cat > /etc/fstab << EOF
+# <file system>                            <mount>  <type>  <options>                              <dump>  <pass>
+UUID=${efi_uuid}   /boot    vfat    defaults,umask=0077,fmask=0077,dmask=0077    0       2
+UUID=${root_uuid}  /        ext4    defaults,noatime                               0       1
+EOF
+
+echo "fstab created:"
+cat /etc/fstab
+
 echo "=== User configuration saved ==="
 cat > /home/${USERNAME}/login_info.txt << EOF
 Hostname: ${HOSTNAME}
@@ -499,8 +513,8 @@ Boot Optimizations Applied:
   - Kernel parameters: quiet, loglevel=3, nowatchdog
   - Initramfs compression: zstd (fastest)
   - Systemd timeouts: Reduced to 10s
-  - Journal storage: volatile (RAM only during boot)
   - Network wait: Disabled (systemd-networkd-wait-online masked)
+  - Journal storage: volatile (RAM only during boot)
   - DNS: Local cache enabled, DNSSEC/DoT disabled for speed
 
 Kernel Management:
@@ -517,7 +531,7 @@ System Maintenance:
   - To update later: sudo pacman -Syu
   - Clean package cache: sudo pacman -Sc
 
-No fstab - systemd handles mounting automatically.
+fstab: /boot (EFI) and / (root) are properly configured.
 EOF
 chmod 600 /home/${USERNAME}/login_info.txt
 chown ${USERNAME}:${USERNAME} /home/${USERNAME}/login_info.txt
@@ -525,22 +539,11 @@ chown ${USERNAME}:${USERNAME} /home/${USERNAME}/login_info.txt
 echo "=== Building initramfs ==="
 touch /etc/vconsole.conf
 
-# ปรับแต่ง mkinitcpio เพื่อความเร็ว
 cat > /etc/mkinitcpio.conf << 'EOF'
-# MODULES - เพิ่มเฉพาะที่จำเป็น
 MODULES=(ext4)
-
-# BINARIES
 BINARIES=()
-
-# FILES
 FILES=()
-
-# HOOKS - ลดเหลือเฉพาะที่จำเป็น เพื่อความเร็ว
-# ไม่ใช้ autodetect เพื่อความเสถียร แต่เลือก hooks น้อยที่สุด
 HOOKS=(base systemd autodetect modconf kms keyboard sd-vconsole block filesystems fsck)
-
-# COMPRESSION - ใช้ zstd เพื่อความเร็วในการบูต
 COMPRESSION="zstd"
 COMPRESSION_OPTIONS=(-1 -T0)
 EOF
@@ -551,10 +554,10 @@ echo "Installation complete!"
 INSTALLSCRIPT
 
     chmod +x /mnt/root/install.sh
-    
+
     echo "=== Running installation in chroot ==="
     chroot /mnt /root/install.sh "$ACTION" "$USERNAME" "$PASSWORD"
-    
+
     echo "=== Configuring network ==="
     if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
         cat << EOF > /mnt/etc/systemd/network/20-ovh.network
@@ -584,11 +587,8 @@ EOF
     fi
 
     echo "=== Cleaning up ==="
-    # ออกจาก chroot ก่อน (ถ้ามี process ค้าง)
     sync
-    
-    # ใช้ฟังก์ชัน safe_umount สำหรับทุก mount point
-    # Umount ตามลำดับจากใน -> นอก
+
     safe_umount /mnt/tmp
     safe_umount /mnt/sys
     safe_umount /mnt/proc
@@ -596,7 +596,7 @@ EOF
     safe_umount /mnt/dev
     safe_umount /mnt/boot
     safe_umount /mnt
-    
+
     echo ""
     echo "======================================"
     echo "Installation completed successfully!"
@@ -631,6 +631,7 @@ EOF
     echo "  • linux-zen kernel installed"
     echo "  • Auto-update boot entries on kernel changes"
     echo "  • Pacman hooks enabled for kernel management"
+    echo "  • fstab configured: /boot auto-mounts on every boot"
     echo "  • To install additional kernels:"
     echo "    sudo pacman -S linux        # Standard kernel"
     echo "    sudo pacman -S linux-lts    # Long-term support"
@@ -641,7 +642,10 @@ EOF
     echo "  • All packages are at the latest version"
     echo "  • Future updates: sudo pacman -Syu"
     echo ""
-    echo "No fstab - systemd handles mounting"
+    echo "Fixes applied vs original script:"
+    echo "  [1] /etc/fstab created → /boot auto-mounts after reboot"
+    echo "  [2] Pacman hook triggers on Path (after mkinitcpio)"
+    echo "  [3] update-boot-entries.sh checks /boot mount before writing"
     echo ""
     echo "Now reboot the VPS from the OVH control panel"
     echo "======================================"
