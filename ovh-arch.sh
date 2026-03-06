@@ -303,11 +303,11 @@ HOOKEOF
 # เพื่อให้ทำงานหลัง mkinitcpio สร้าง initramfs เสร็จแล้วจริงๆ
 cat > /etc/pacman.d/hooks/90-kernel-boot-entry.hook << 'HOOKEOF'
 [Trigger]
-Type = Path
+Type = File
 Operation = Install
 Operation = Upgrade
-Path = usr/lib/modules/*/vmlinuz
-Path = boot/initramfs-*.img
+Target = usr/lib/modules/*/vmlinuz
+Target = boot/initramfs-*.img
 
 [Action]
 Description = Updating kernel boot entries after kernel/initramfs change
