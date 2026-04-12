@@ -20,63 +20,62 @@ ipv4_address=""
 ipv4_prefix=""
 ipv4_gateway=""
 ipv6_address=""
-ipv6_prefix="128"
+ipv6_prefix=""
 ipv6_gateway=""
+iface=""
 
 get_network_info() {
     echo "=== Detecting network configuration ==="
 
-    local iface=$(ip -4 route | grep default | sed -e "s/^.*dev \([^ ]*\) .*$/\1/" | head -n1)
+    iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
     if [ -z "$iface" ]; then
-        echo "Could not determine default IPv4 interface." >&2
+        echo "Could not determine default interface." >&2
         exit 1
     fi
     echo "Default interface: $iface"
 
-    local ip_info=$(ip -4 addr show dev "$iface" | grep "inet " | awk '{print $2}' | head -n1)
-    if [ -z "$ip_info" ]; then
+    local ip4_info
+    ip4_info="$(ip -4 -o addr show dev "$iface" scope global | awk '{print $4; exit}')"
+    if [ -z "$ip4_info" ]; then
         echo "Could not determine IPv4 address for interface $iface." >&2
         exit 1
     fi
-    ipv4_address=$(echo "$ip_info" | cut -d'/' -f1)
-    ipv4_prefix=$(echo "$ip_info" | cut -d'/' -f2)
 
-    ipv4_gateway=$(ip -4 route | grep default | awk '{print $3}' | head -n1)
+    ipv4_address="${ip4_info%/*}"
+    ipv4_prefix="${ip4_info#*/}"
+
+    ipv4_gateway="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
     if [ -z "$ipv4_gateway" ]; then
         echo "Could not determine default IPv4 gateway." >&2
         exit 1
     fi
+
     echo "IPv4 Address: $ipv4_address"
     echo "IPv4 Prefix: $ipv4_prefix"
     echo "IPv4 Gateway: $ipv4_gateway"
 
     echo "Detecting IPv6 configuration..."
-    ipv6_address=$(ip -6 route 2>/dev/null | grep -v "^fe80" | grep -v "^ff00" | head -n1 | cut -f1 -d" " || echo "")
 
-    if [ -z "$ipv6_address" ] || [ "$ipv6_address" = "::1" ]; then
-        echo "Warning: No IPv6 address found"
-        ipv6_gateway=""
-    else
-        echo "IPv6 Address found: $ipv6_address"
+    local ip6_info
+    ip6_info="$(ip -6 -o addr show dev "$iface" scope global 2>/dev/null | awk '{print $4; exit}')"
 
-        if [ -f /etc/network/interfaces.d/50-cloud-init ]; then
-            local ipv6_gateway_info=$(grep -i "gateway" /etc/network/interfaces.d/50-cloud-init 2>/dev/null | grep -v "^#" | grep ":" | head -n1 | awk '{print $NF}' || echo "")
-            if [ -n "$ipv6_gateway_info" ]; then
-                ipv6_gateway=$(echo "$ipv6_gateway_info" | cut -d'/' -f1)
-                echo "IPv6 Gateway: $ipv6_gateway"
-            else
-                echo "Warning: Could not determine IPv6 gateway from cloud-init"
-                ipv6_gateway=""
-            fi
+    if [ -n "$ip6_info" ]; then
+        ipv6_address="${ip6_info%/*}"
+        ipv6_prefix="${ip6_info#*/}"
+        ipv6_gateway="$(ip -6 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+
+        echo "IPv6 Address: $ipv6_address"
+        echo "IPv6 Prefix: $ipv6_prefix"
+        if [ -n "$ipv6_gateway" ]; then
+            echo "IPv6 Gateway: $ipv6_gateway"
         else
-            echo "Warning: /etc/network/interfaces.d/50-cloud-init not found"
-            ipv6_gateway=$(ip -6 route 2>/dev/null | grep "^default" | awk '{print $3}' || echo "")
-            if [ -n "$ipv6_gateway" ]; then
-                echo "IPv6 Gateway (from routing table): $ipv6_gateway"
-            else
-                echo "Warning: Could not determine IPv6 gateway"
-            fi
+            echo "Warning: No IPv6 default gateway found"
         fi
+    else
+        ipv6_address=""
+        ipv6_prefix=""
+        ipv6_gateway=""
+        echo "No global IPv6 address found"
     fi
 
     echo "Network detection complete"
@@ -220,9 +219,13 @@ function main() {
 
     echo "=== Configuring pacman ==="
     cat > /mnt/etc/pacman.d/mirrorlist << 'EOF'
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://mirror.pkgbuild.com/$repo/os/$arch
 EOF
-    sed -i -e 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
+    sed -i \
+      -e 's/^#ParallelDownloads.*/ParallelDownloads = 5/' \
+      -e 's/^#Color/Color/' \
+      /mnt/etc/pacman.conf
 
     echo "=== Preparing chroot environment ==="
     cp /etc/resolv.conf /mnt/etc/resolv.conf
@@ -250,11 +253,21 @@ echo "=== Initializing pacman keyring ==="
 pacman-key --init
 pacman-key --populate archlinux
 
-echo "=== Installing packages ==="
-pacman -Sy --noconfirm base linux-zen linux-zen-headers linux-firmware openssh sudo
+echo "=== Refreshing package databases ==="
+pacman -Syy --noconfirm archlinux-keyring
 
-echo "=== Updating system (pacman -Syu) ==="
-pacman -Syu --noconfirm
+echo "=== Installing base system and updating in one transaction ==="
+pacman -Syu --noconfirm \
+    base \
+    linux-zen \
+    linux-zen-headers \
+    linux-firmware \
+    openssh \
+    sudo \
+    systemd \
+    e2fsprogs \
+    dosfstools \
+    inetutils
 
 echo "=== Installing systemd-boot ==="
 bootctl --path=/boot install
@@ -559,10 +572,12 @@ INSTALLSCRIPT
     chroot /mnt /root/install.sh "$ACTION" "$USERNAME" "$PASSWORD"
 
     echo "=== Configuring network ==="
-    if [ -n "$ipv6_gateway" ] && [ -n "$ipv6_address" ] && [ "$ipv6_address" != "::1" ]; then
+    mkdir -p /mnt/etc/systemd/network
+
+    if [ -n "$ipv6_address" ] && [ -n "$ipv6_prefix" ] && [ -n "$ipv6_gateway" ]; then
         cat << EOF > /mnt/etc/systemd/network/20-ovh.network
 [Match]
-Name=en*
+Name=${iface}
 
 [Network]
 DHCP=ipv4
@@ -572,17 +587,26 @@ DNS=1.1.1.1
 DNS=8.8.8.8
 DNS=2606:4700:4700::1111
 DNS=2001:4860:4860::8888
+
+[DHCPv4]
+RouteMetric=10
+
+[IPv6AcceptRA]
+UseDNS=no
 EOF
     else
         echo "IPv6 not configured, using IPv4 only"
         cat << EOF > /mnt/etc/systemd/network/20-ovh.network
 [Match]
-Name=en*
+Name=${iface}
 
 [Network]
 DHCP=ipv4
 DNS=1.1.1.1
 DNS=8.8.8.8
+
+[DHCPv4]
+RouteMetric=10
 EOF
     fi
 
